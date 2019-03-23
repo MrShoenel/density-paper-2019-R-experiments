@@ -1,0 +1,248 @@
+---
+title: "Experiments for RQ 1"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r warning=FALSE}
+source("../helpers.R")
+knitr::opts_chunk$set(rows.print=25, cols.print=15)
+```
+
+# Research Question 1
+For this question, we want to answer some statistical properties of our datasets, using descriptive statistics. Since the RQ and its facettes all relate to labelled commits, we will be using the __`jeX_L`__ dataset.
+
+```{r}
+ds <- getDataset("jeX_L")
+ds <- ds[, !names(ds) %in% c("commitId", "comment")]
+ds$label <- as.factor(ds$label)
+ds$project <- as.factor(ds$project)
+
+# Generate a few columns, such as "gross-size":
+ds$GrossSize <- ds$NumberOfLinesAddedByAddedFiles + ds$NumberOfLinesAddedByModifiedFiles + ds$NumberOfLinesAddedByRenamedFiles + ds$NumberOfLinesDeletedByDeletedFiles + ds$NumberOfLinesDeletedByModifiedFiles + ds$NumberOfLinesDeletedByRenamedFiles
+
+ds$NetSize <- ds$GrossSize * ds$Density
+
+ds$GrossFiles <- ds$NumberOfFilesAdded + ds$NumberOfFilesDeleted + ds$NumberOfFilesModified + ds$NumberOfFilesRenamed
+ds$NetFiles <- ds$GrossFiles * ds$AffectedFilesRatioNet
+```
+
+# Distributions of labels
+```{r}
+labelDist <- table(ds$label)
+print(labelDist)
+barplot(labelDist)
+```
+
+## First Part
+We are following Herraiz et al. for determining if the evolutionary patterns are the same for classifying commits, w.r.t. number of files and lines of code. We are approaching this by plotting the density of gross- and net-amount of files and gross- and net-amount of lines of code.
+
+```{r}
+install.packagesCond("dplyr")
+library("dplyr")
+install.packagesCond("plyr")
+library("plyr")
+install.packagesCond("ggplot2")
+library("ggplot2")
+install.packagesCond("tikzDevice")
+library("tikzDevice")
+```
+
+```{r}
+s_nf <- summary(ds$NetFiles)
+mu_nf <- ddply(ds, "label", summarise, grp.mean=mean(NetFiles))
+nf <- ggplot(data.frame(NetFiles=ds$NetFiles+0.1,Type=ds$label), aes(NetFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Net-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_nf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+
+s_gf <- summary(ds$GrossFiles)
+mu_gf <- ddply(ds, "label", summarise, grp.mean=mean(GrossFiles))
+gf <- ggplot(data.frame(GrossFiles=ds$GrossFiles,Type=ds$label), aes(GrossFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Gross-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+
+s_ns <- summary(ds$NetSize)
+mu_ns <- ddply(ds, "label", summarise, grp.mean=mean(NetSize))
+ns <- ggplot(data.frame(NetSize=ds$NetSize+0.1,Type=ds$label), aes(NetSize, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Net-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_ns, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+
+s_gs <- summary(ds$GrossSize)
+mu_gs <- ddply(ds, "label", summarise, grp.mean=mean(GrossSize))
+gs <- ggplot(data.frame(GrossSize=ds$GrossSize,Type=ds$label), aes(GrossSize, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Gross-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gs, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+
+gridExtra::grid.arrange(gf, gs, nf, ns, nrow=2)
+
+all_mus <- data.frame(
+  label=sapply(mu_ns$label, function(x) paste("mean,",x)),
+  gf=mu_gf$grp.mean,
+  nf=mu_nf$grp.mean,
+  gs=mu_gs$grp.mean,
+  ns=mu_ns$grp.mean
+)
+
+print(all_mus)
+
+all_s <- data.frame(
+  type=c("Median", "Min", "Mean", "Max"),
+  gf=c(s_gf[[3]], s_gf[[1]], s_gf[[4]], s_gf[[6]]),
+  nf=c(s_nf[[3]], s_nf[[1]], s_nf[[4]], s_nf[[6]]),
+  gs=c(s_gs[[3]], s_gs[[1]], s_gs[[4]], s_gs[[6]]),
+  ns=c(s_ns[[3]], s_ns[[1]], s_ns[[4]], s_ns[[6]])
+)
+
+print(all_s)
+```
+
+```{r}
+tikzDevice::tikz('density_plots.tex', width = 3.4, height = 5)
+gridExtra::grid.arrange(gf, nf, gs, ns, nrow=4)
+dev.off()
+```
+
+From these analyses, we can draw the following conclusions. First of all, the distributions of amount of files and lines of code is very similar, when comparing gross with its respective net, when compared to size of at least one line. As expected, the minimum values for gross values (i.e., lines or files) are $1$ (as a commit cannot comprise an empty set of changes), whereas the net-values can, and are, in fact be $0$. That explains why we can observe significant amounts of commits, that do not have any files or lines affected, especially for the corrective and perfective labels.
+
+```{r}
+sizes <- c("label", "GrossFiles", "NetFiles", "GrossSize", "NetSize")
+labels <- c("a", "c", "p")
+probTable <- data.frame(
+  matrix(ncol = length(sizes), nrow = 0), stringsAsFactors = FALSE)
+
+for (l in labels) {
+  
+  row1 <- list()
+  row2 <- list()
+  row3 <- list()
+  
+  for (s in sizes[2:length(sizes)]) {
+    e <- ecdf(ds[s][ds["label"] == l] + 0.1)
+    
+    row1[["label"]] <- paste(l, "[0,1)", sep = ", ")
+    row2[["label"]] <- paste(l, "[1,2)", sep = ", ")
+    row3[["label"]] <- paste(l, "[2,5)", sep = ", ")
+    
+    row1[[s]] <- e(1 - 1e-12)
+    row2[[s]] <- e(2 - 1e-12) - e(1 - 1e-12)
+    row3[[s]] <- e(5 - 1e-12) - e(1 - 1e-12)
+  }
+  
+  probTable <- rbind(probTable, row1)
+  probTable$label <- as.character(probTable$label)
+  probTable <- rbind(probTable, row2)
+  probTable <- rbind(probTable, row3)
+}
+
+print(probTable)
+```
+
+```{r}
+print(cor(ds$NetFiles, ds$NetSize))
+print(cor(ds$GrossFiles, ds$GrossSize))
+```
+
+
+
+## Part B
+Every tenth commit is a small change (i.e. only one line affected). Are net-size commits increasing this percentage? We will use the ECDF of the entire dataset to find out whether this is true.
+
+Here we will check what the probabiltiy of a certain kind of commit in a certain size-range is.
+```{r}
+size <- nrow(ds)
+ranges <- c(0, 1, 2, 4, 8, 15, 25, 50, 75, 100)
+
+ecdfNet <- ecdf(ds$NetSize)
+ecdfGro <- ecdf(ds$GrossSize)
+
+ecdfTable <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+
+for (r in ranges) {
+  tNet <- table(ds[ds$NetSize <= r,]["label"])
+  tNet <- tNet / ifelse(sum(tNet) == 0, 1, sum(tNet)) # normalize percentages
+  tGro <- table(ds[ds$GrossSize <= r,]["label"])
+  tGro <- tGro / ifelse(sum(tGro) == 0, 1, sum(tGro))
+  
+  for (l in labels) {
+    newRow <- list(
+      type = paste(l, "<=", r, sep = ", "),
+      max = r,
+      label = l
+    )
+    newRow[["net"]] <- tNet[[l]]
+    newRow[["gro"]] <- tGro[[l]]
+    
+    ecdfTable <- rbind(ecdfTable, newRow)
+    ecdfTable$type <- as.character(ecdfTable$type)
+    ecdfTable$label <- as.character(ecdfTable$label)
+  }
+}
+
+print(ecdfTable)
+
+# Now let's plot them:
+temp <- ecdfTable[order(ecdfTable$label, ecdfTable$max), ]
+
+gro_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=gro)) + theme_light(base_size = 9) + scale_fill_brewer(palette = "Paired") + ylab("Ratio") + xlab("Gross-size, LOC, ecdf(x)") + labs(fill="Type")
+
+net_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=net)) + theme_light(base_size = 9) + scale_fill_brewer(palette = "Paired") + ylab("Ratio") + xlab("Net-size, LOC, ecdf(x)") + labs(fill="Type")
+
+gridExtra::grid.arrange(gro_et, net_et, nrow=2)
+
+tikzDevice::tikz('ecdf_ratio_per_label.tex', width = 3.4, height = 2.6)
+gridExtra::grid.arrange(gro_et, net_et, nrow=2)
+dev.off()
+```
+
+
+Also, let's check the distribution of commits within specific ranges, regardless of their label:
+
+```{r}
+percTable <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = F)
+
+for (r in ranges) {
+  tNet <- table(ds[ds$NetSize <= r,]["label"])
+  tGro <- table(ds[ds$GrossSize <= r,]["label"])
+  
+  newRow <- list(
+    type = paste("all", "<=", r, sep = ", "),
+    max = r,
+    net = sum(tNet) / size,
+    gro = sum(tGro) / size
+  )
+  
+  percTable <- rbind(percTable, newRow)
+  percTable$type <- as.character(percTable$type)
+}
+
+print(percTable)
+```
+
+Now let's print these two series as well:
+
+```{r}
+temp <- percTable[order(percTable$max), ]
+
+temp1 <- data.frame(
+  max = rep(temp$max, each=2),
+  Type = rep(c("Net", "Gross"), nrow(temp)),
+  value = as.vector(rbind(temp$net, temp$gro))
+)
+
+ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Size, LOC, ecdf(x)") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + ylim(0,0.8)
+
+tikzDevice::tikz('ratio_range_commit.tex', width = 3.4, height = 2)
+ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Size, LOC, ecdf(x)") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + ylim(0,0.8)
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+

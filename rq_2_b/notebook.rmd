@@ -1,0 +1,239 @@
+---
+title: "Experiments for RQ 2 (B)"
+output:
+  html_document:
+    df_print: kable
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+# Research Question 2 (B)
+The question was the following: ___"Do the net-size related attributes perform better in classification, compared to the gross-size attributes?"___
+
+For this experiment, we will use the __`geX_L`__ dataset again, as it contains the previous labels, as well as net- and gross-size attributes. We will split this dataset vertically, separating it into columns that adhere to the net- and then the gross-size. We will be attempting to answer the question both for cross- and single- projects.
+
+```{r warning=FALSE}
+source("../helpers.R")
+knitr::opts_chunk$set(rows.print=25, cols.print=15)
+```
+
+# Use regression
+We want to predict the label of the commit using only the extended attributes. Therefore, we rely solely on the __`geX_L`__ dataset, which features those extended attributes and labels, as they were obtained by the previous authors.
+
+```{r warning=FALSE}
+install.packagesCond("gbm")
+library("gbm")
+install.packagesCond("MASS")
+library("MASS")
+
+dsAll <- getDataset("geX_L")
+
+# Store the names of the Net-columns:
+netCols <- mapply(function(x) return(grepl("Net$", x)), colnames(dsAll))
+colsNamesNet <- colnames(dsAll)[netCols]
+colsNamesGross <- as.vector(mapply(function(x) return(substr(x, 1, nchar(x)-3)), colsNamesNet))
+# Cut off the "AffectedFilesRatioNet"-column:
+colsNamesGross <- colsNamesGross[1:(length(colsNamesGross)-1)]
+
+colsNamesCommon <- c("label", "RepoPathOrUrl")
+
+# Generate net- and gross-datasets:
+dsNet <- dsAll[, names(dsAll) %in% c(colsNamesCommon, colsNamesNet, "Density")]
+dsGross <- dsAll[, names(dsAll) %in% c(colsNamesCommon, colsNamesGross)]
+
+# Detach label and repo-path (will use later or separate)
+ds.label <- as.factor(dsNet$label)
+ds.RepoPath <- as.factor(dsNet$RepoPathOrUrl)
+
+colsNamesRemove <- c("label", "RepoPathOrUrl")
+dsNet <- dsNet[, !names(dsNet) %in% colsNamesRemove]
+dsGross <- dsGross[, !names(dsGross) %in% colsNamesRemove]
+```
+
+# Selection by building a model
+Using a _Recursive Feature Elimination_.
+
+```{r warning=FALSE}
+install.packagesCond("mlbench")
+library("mlbench")
+install.packagesCond("caret")
+library("caret")
+
+
+set.seed(31)
+
+# We are training models now using RandomForests:
+install.packagesCond("randomForest")
+
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
+
+# attempt to try sets of attributes between 1 and all attributes of size
+resultsNet <- rfe(dsNet, ds.label, sizes = c(1:length(dsNet)), rfeControl = control)
+resultsGross <- rfe(dsGross, ds.label, sizes = c(1:length(dsGross)), rfeControl = control)
+
+print(resultsNet)
+plot(resultsNet, type=c("g", "o"))
+
+print(resultsGross)
+plot(resultsGross, type=c("g", "o"))
+
+print(
+  confusionMatrix(predictZeroR(ds.label), ds.label)
+)
+```
+
+From these results, we can see that the classification accuracy and obtained kappa values are very similar. Even though for net-based classification a seven-variable is the second best, we observe an almost continuous improvement by adding more variables to the gross-based models. While the optimal models use 14 resp. ten variables, the recommendation here would be to use the seven- and eight-variables models (for net net/gross resp.), as only minor improvements are obtained beyond, for the price of increased model complexity.
+
+|    | Acc., net | Acc., gross | Kappa, net | Kappa gross |
+|----|----------:|------------:|-----------:|------------:|
+|max |`r max(resultsNet$results$Accuracy)`|`r max(resultsGross$results$Accuracy)`|`r max(resultsNet$results$Kappa)`|`r max(resultsGross$results$Kappa)`|
+|min |`r min(resultsNet$results$Accuracy)`|`r min(resultsGross$results$Accuracy)`|`r min(resultsNet$results$Kappa)`|`r min(resultsGross$results$Kappa)`|
+|avg |`r mean(resultsNet$results$Accuracy)`|`r mean(resultsGross$results$Accuracy)`|`r mean(resultsNet$results$Kappa)`|`r mean(resultsGross$results$Kappa)`|
+<!--|sum |`r sum(resultsNet$results$Accuracy)`|`r sum(resultsGross$results$Accuracy)`|`r sum(resultsNet$results$Kappa)`|`r sum(resultsGross$results$Kappa)`|-->
+
+From this table, it is clear that net-based models have steadily larger values for minimum, maximum and average accuary and kappa. However, none of these improvements can be considered significant.
+
+```{r}
+print(resultsNet$optVariables)
+print(resultsGross$optVariables)
+```
+
+It appears that the net-dataset uses the attributes `Density` and `AffectedFilesRatioNet` amongst its top-5 important attributes.
+
+
+# Selection by building a model (single-project)
+Since the variable importances changed only slightly and only for some attributes, the expected results are considered not to be significant. However, the feature selection process using RFE also yields a trained model, which will provide us with some insights into expectable classification accuracy and kappa values.
+
+```{r}
+projects <- unique(dsAll$RepoPathOrUrl)
+selProjNames <- c("project", "numVars", "accuracy", "kappa", "accuracy_sd", "kappa_sd", "acc_ZeroR")
+```
+
+# Net-projects
+```{r}
+# For the net-projects
+selProj <- data.frame(
+  matrix(ncol = length(selProjNames), nrow = 0), stringsAsFactors = FALSE)
+colnames(selProj) <- selProjNames
+varListProj <- list()
+
+dsNet$label <- ds.label
+dsNet$RepoPathOrUrl <- ds.RepoPath
+
+for (p in projects) {
+  dsProj <- dsNet[dsNet$RepoPathOrUrl == p,]
+  dsProj.label <- dsProj$label
+  
+  # Remove Url-feature and label again:
+  dsProj <- dsProj[, !names(dsProj) %in% c("RepoPathOrUrl", "label")]
+  
+  # Train will sometimes report zero variance for variables with variance just close to zero.
+  # We have to remove those (including the zero-variance variables, too).
+  dsProj <- dsProj[, !names(dsProj) %in% nearZeroVar(dsProj, names = TRUE)]
+  
+  set.seed(31)
+  
+  control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
+  results <- rfe(dsProj, dsProj.label, sizes = c(1:length(dsProj)), rfeControl = control)
+  cmZeroR <- confusionMatrix(predictZeroR(dsProj.label), dsProj.label)
+  
+  varListProj[[p]] <- results$optVariables
+  rTuple <- results$results[results$optsize:results$optsize, ]
+  newRow <- list()
+  # cut same prefix and append number of variables used in parentheses
+  newRow["project"] <- paste(as.character(substr(p, 20, nchar(p) + 20)), paste("(", as.character(rTuple$Variables), ")", sep = ""))
+  newRow["numVars"] <- rTuple$Variables
+  newRow["accuracy"] <- rTuple$Accuracy
+  newRow["kappa"] <- rTuple$Kappa
+  newRow["accuracy_sd"] <- rTuple$AccuracySD
+  newRow["kappa_sd"] <- rTuple$KappaSD
+  newRow["acc_ZeroR"] <- cmZeroR$overall[["Accuracy"]]
+  
+  selProj <- rbind(selProj, newRow)
+  selProj$project <- as.character(selProj$project)
+}
+
+selProj$project <- as.factor(selProj$project)
+selProj <- selProj[order(selProj$numVars, decreasing = TRUE), ]
+print(selProj)
+print(varListProj)
+
+rotate_x(selProj, "numVars", selProj$project, 35)
+
+install.packagesCond("reshape2")
+library("reshape2")
+
+ggplot(selProj, aes(x=accuracy, y=kappa, shape=project, group=project, color=project)) + geom_point(size=7.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + xlim(0.45, 0.65) + ylim(0, 0.45)
+```
+
+
+# Gross-projects
+```{r}
+# For the net-projects
+selProjGross <- data.frame(
+  matrix(ncol = length(selProjNames), nrow = 0), stringsAsFactors = FALSE)
+colnames(selProjGross) <- selProjNames
+varListProj <- list()
+
+dsGross$label <- ds.label
+dsGross$RepoPathOrUrl <- ds.RepoPath
+
+for (p in projects) {
+  dsProj <- dsGross[dsGross$RepoPathOrUrl == p,]
+  dsProj.label <- dsProj$label
+  
+  # Remove Url-feature and label again:
+  dsProj <- dsProj[, !names(dsProj) %in% c("RepoPathOrUrl", "label")]
+  
+  # Train will sometimes report zero variance for variables with variance just close to zero.
+  # We have to remove those (including the zero-variance variables, too).
+  dsProj <- dsProj[, !names(dsProj) %in% nearZeroVar(dsProj, names = TRUE)]
+  
+  set.seed(31)
+  
+  control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
+  results <- rfe(dsProj, dsProj.label, sizes = c(1:length(dsProj)), rfeControl = control)
+  cmZeroR <- confusionMatrix(predictZeroR(dsProj.label), dsProj.label)
+  
+  varListProj[[p]] <- results$optVariables
+  rTuple <- results$results[results$optsize:results$optsize, ]
+  newRow <- list()
+  # cut same prefix and append number of variables used in parentheses
+  newRow["project"] <- paste(as.character(substr(p, 20, nchar(p) + 20)), paste("(", as.character(rTuple$Variables), ")", sep = ""))
+  newRow["numVars"] <- rTuple$Variables
+  newRow["accuracy"] <- rTuple$Accuracy
+  newRow["kappa"] <- rTuple$Kappa
+  newRow["accuracy_sd"] <- rTuple$AccuracySD
+  newRow["kappa_sd"] <- rTuple$KappaSD
+  newRow["acc_ZeroR"] <- cmZeroR$overall[["Accuracy"]]
+  
+  selProjGross <- rbind(selProjGross, newRow)
+  selProjGross$project <- as.character(selProjGross$project)
+}
+
+selProjGross$project <- as.factor(selProjGross$project)
+selProjGross <- selProjGross[order(selProjGross$numVars, decreasing = TRUE), ]
+print(selProjGross)
+print(varListProj)
+
+rotate_x(selProjGross, "numVars", selProjGross$project, 35)
+
+install.packagesCond("reshape2")
+library("reshape2")
+
+ggplot(selProjGross, aes(x=accuracy, y=kappa, shape=project, group=project, color=project)) + geom_point(size=7.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + xlim(0.45, 0.65) + ylim(0, 0.45)
+```
+
+
+Aggregation of the per-project results, net vs. gross:
+
+
+|    | Acc., net | Acc., gross | Kappa, net | Kappa gross |
+|----|----------:|------------:|-----------:|------------:|
+|max |`r max(selProj$accuracy)`|`r max(selProjGross$accuracy)`|`r max(selProj$kappa)`|`r max(selProjGross$kappa)`|
+|min |`r min(selProj$accuracy)`|`r min(selProjGross$accuracy)`|`r min(selProj$kappa)`|`r min(selProjGross$kappa)`|
+|avg |`r mean(selProj$accuracy)`|`r mean(selProjGross$accuracy)`|`r mean(selProj$kappa)`|`r mean(selProjGross$kappa)`|
+<!--|sum |`r sum(selProj$accuracy)`|`r sum(selProjGross$accuracy)`|`r sum(selProj$kappa)`|`r sum(selProjGross$kappa)`|-->
+
+While the significance between net- and gross-based models is very little again, the net-based models perform slightly worse for accuary, but manage to stay very slightly atop with absolute values for Kappa.

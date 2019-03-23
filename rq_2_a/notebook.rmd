@@ -1,0 +1,412 @@
+---
+title: "Experiments for RQ 2 (A)"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r warning=FALSE}
+source("../helpers.R")
+knitr::opts_chunk$set(rows.print=25, cols.print=15)
+```
+
+# Use regression
+We want to predict the label of the commit using only the extended attributes. Therefore, we rely solely on the __`geX_L`__ dataset, which features those extended attributes and labels, as they were obtained by the previous authors.
+
+```{r warning=FALSE}
+install.packagesCond("gbm")
+library("gbm")
+install.packagesCond("MASS")
+library("MASS")
+```
+
+
+We will use gradient boosting to determine the importance of each variable in the new dataset. Note that we have to convert the `label`-column to a numeric vector first and remove the old one. Let's load the __`geX_L`__ dataset for RQ 1 (A).
+
+```{r warning=FALSE}
+ds <- getDataset("geX_L")
+
+# Store the label for later use, we will remove it for now.
+ds.label <- as.factor(ds$label)
+
+# We will later re-attach those, so that we can check each project separately.
+ds.repoPathOrUrl <- ds$RepoPathOrUrl
+
+# .. also, remove some columns that are unimportant or have no variation:
+ds <- ds[, !names(ds) %in% c("RepoPathOrUrl")]
+
+# store dataset as arff for usage in Weka:
+install.packagesCond("rmcfs")
+library("rmcfs")
+write.arff(ds, file = normalizePath("./ds.arff"), target = "label")
+
+# .. and remove nominal column
+ds <- ds[, !names(ds) %in% c("label")]
+```
+
+# Features (multi-project)
+Except for the attribute `MinutesSincePreviousCommit`, the extended data covers information about the size, in terms of lines added and removed, through various scenarios. We will now study all of the attributes to eliminate any redundant features or those that have very little significance.
+
+## Attribute Correlation
+Here we are looking at the correlation between the new extended attributes, for all projects.
+
+```{r warning=FALSE}
+install.packagesCond("mlbench")
+library("mlbench")
+install.packagesCond("caret")
+library("caret")
+install.packagesCond("tikzDevice")
+library("tikzDevice")
+
+set.seed(31)
+
+# Check for (near-)zero-variance predictors:
+nzv <- nearZeroVar(ds, saveMetrics = TRUE)
+
+print(nzv)
+
+# .. and remove the zero-variance ones:
+ds <- ds[, !nzv$zeroVar]
+
+# Calculate the correlation matrix for all attributes:
+corrMatrix <- cor(ds[, 1:length(ds)])
+
+# Find the attributes that are highly correlated (at least .75 or more):
+corrCoeff <- 0.75
+highCorr <- findCorrelation(corrMatrix, cutoff = corrCoeff, exact = TRUE, names = TRUE)
+print(highCorr)
+
+# Now let's remove those highly correlated attributes:
+ds <- ds[, !names(ds) %in% highCorr]
+```
+
+We can identify a number of highly correlated features, which is not surprising, as e.g. counts of lines added or deleted net/gross are always positively correlated. We have chosen to remove features with a correlation coefficient higher than __`r corrCoeff`__. If a pair of two highly correlated attributes is identified, the variable with the largest mean absolute correlation is targeted for removal.
+
+The remaining attributes are: __`r paste(names(ds), collapse = ", ")`__. We can identify that all but two of the remaining attributes are the _net_-version. Also, the __Density__- and __AffectedFilesRatioNet__-attributes were selected.
+
+## Variable Importance
+We are trying to estimate the importance of each feature of our extended features, by building supervised Learning Vector Quantization [1] model.
+
+```{r warning=FALSE}
+set.seed(31)
+
+# We gotta reattach the nominal labels so that training works:
+ds$label <- ds.label
+
+control <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+# As method, we may also check "gbm", "xgbTree" (eXtreme
+# Gradient Boosting) or "lvq" (Learning Vector Quantization)
+# - remember to use verbose=FALSE for gbm
+# If using lvq, we get importance for each predictor per label!
+model <- train(label ~ ., data = ds, method = "lvq", trControl=control)
+importance <- varImp(model, scale=TRUE)
+
+temp <- rowSums(importance$importance)
+# Attach an average-column to the importance of variables:
+importance$importance$avg <-
+  mapply(function(x) return(x/ncol(importance$importance)), temp)
+
+# Sort importance of variables by average importance, best first
+importance.sorted <-
+  importance$importance[order(importance$importance$avg, decreasing = TRUE),]
+
+print(importance.sorted)
+# Please note that in the diagrams, it's not sorted.
+plot(importance)
+
+tikzDevice::tikz('xp_varImp.tex', width = 3.4, height = 2.5)
+plot(importance)
+dev.off()
+```
+
+From this data, we can see that the three top most important features are __`r paste(rownames(importance.sorted)[1:3], collapse = ', ')`__. They account for an average importance of `r mean(importance.sorted$avg[1:3])`. For determining the _a_- and _c_-labels, the feature __`r rownames(importance.sorted)[1]`__ has an importance of $100$%, and the highest importance of $86.19$% for the p-label, which is remarkable.
+
+
+## Selection by building a model
+Using a _Recursive Feature Elimination_.
+
+```{r warning=FALSE}
+set.seed(31)
+
+# We are training models now using RandomForests:
+install.packagesCond("randomForest")
+
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
+resultsX <- rfe(ds[, 1:(length(ds)-1)], ds.label,
+               # attempt to try sets of attributes between 1 and all attributes of size
+               sizes = c(1:(length(ds)-1)), rfeControl = control)
+```
+
+```{r}
+print(
+  confusionMatrix(predictZeroR(ds$label), ds$label)
+)
+```
+
+```{r}
+print(resultsX)
+plot(resultsX, type=c("g", "o"))
+ggplot(resultsX, aes(x = resultsX$results$Accuracy, y = resultsX$results$Kappa)) +  geom_line(size=1,color='#666666') + geom_point(size=3, stroke=1.5, colour="#555555") + geom_point(size=3, aes(color=factor(c(1:nrow(resultsX$results))))) + theme_light(base_size = 9) + theme(legend.position = "none") + scale_x_continuous("Number of Variables", labels = c(1:length(resultsX)), breaks = c(1:length(resultsX))) + scale_color_brewer(palette = "Paired")
+```
+
+```{r}
+tikzDevice::tikz('xp_modelAccuracy.tex', width = 3.4, height = 1.8)
+ggplot(resultsX, aes(x = resultsX$results$Accuracy, y = resultsX$results$Kappa)) +  geom_line(size=1,color='#666666') + geom_point(size=3, stroke=1.5, colour="#555555") + geom_point(size=3, aes(color=factor(c(1:nrow(resultsX$results))))) + theme_light(base_size = 9) + theme(legend.position = "none") + scale_x_continuous("Number of Variables", labels = c(1:length(resultsX)), breaks = c(1:length(resultsX))) + scale_color_brewer(palette = "Paired")
+dev.off()
+```
+
+From these results, it is clear that with each additional feature, the accuracy increases, as does the Kappa, too. We can observe an almost linear increase in those for the models that use four through all eleven variables. This result is somewhat expected, as we have properly preprocessed the data by e.g. removing highly correlated attributes. The best-performing model achieves an accuracy of __`r round(tail(resultsX$results, 1)$Accuracy, 3)`__ and Kappa of __`r round(tail(resultsX$results, 1)$Kappa, 3)`__, which are both respectable, given the kind of data.
+
+
+# Features (single-project)
+In this section, we are attempting to find the most important features for each of the nine (out of originally eleven) projects, by training them separately. For each project, we will determine the best amount of features, and the accuracy and kappa of the best model.
+
+## Attribute correlation per project
+We are investigating the correlation of the extended attributes per project. For that, a correlation matrix for each project is calculated and the most highly correlated attributes are stored.
+
+```{r}
+# Re-attach the repo-path to the dataset:
+ds$RepoPathOrUrl <- ds.repoPathOrUrl
+
+# All projects by URL
+projects <- unique(ds.repoPathOrUrl)
+
+# Prepare empty lists to hold results:
+resultTypes <- c("project", "variables", "accuracy", "kappa")
+resultsProjects <- data.frame(matrix(ncol = length(resultTypes), nrow = length(projects)))
+colnames(resultsProjects) <- resultTypes
+mostCorrelatedAttribs <- c()
+
+# Iterate the projects and prepare a dataset for each.
+for (p in projects) {
+  dsProj <- ds[ds$RepoPathOrUrl == p,]
+  
+  # Remove Url-feature again:
+  dsProj <- dsProj[, !names(dsProj) %in% c("RepoPathOrUrl")]
+  
+  set.seed(31)
+  
+  # Remove zero-variance predictors:
+  zv <- apply(dsProj, 2, function(x) length(unique(x)) == 1)
+  dsProj <- dsProj[, !zv]
+  
+  # Calculate the correlation matrix for all attributes (except the label):
+  corrMatrix <- cor(dsProj[, 1:(length(dsProj)-1)], use = "complete.obs")
+  # Find the attributes that are highly correlated (at least .75 or more):
+  highCorr <- findCorrelation(corrMatrix, cutoff = 0.9, names = TRUE)
+  # Push names into that vector (we will count this later)
+  mostCorrelatedAttribs <- c(mostCorrelatedAttribs, highCorr)
+}
+
+# Let's inspect the most correlated attributes across all projects:
+temp <- data.frame(sort(table(mostCorrelatedAttribs), decreasing = TRUE))
+print(temp)
+rotate_x(temp, "Freq", temp$mostCorrelatedAttribs, 20)
+
+tikzDevice::tikz('sp_mostCorrVars.tex', width = 3.4, height = 2.5)
+rotate_x(temp, "Freq", temp$mostCorrelatedAttribs, 20)
+dev.off()
+```
+
+From these results, we can see that the attribute __`NumberOfLinesDeletedByDeletedFiles`__ is the most frequent (`r table(mostCorrelatedAttribs)["NumberOfLinesDeletedByDeletedFiles"]`) attribute that is highly correlated, whereas the attribute __`NumberOfLinesDeletedByModifiedFilesNet`__ is the least frequent (`r table(mostCorrelatedAttribs)["NumberOfLinesDeletedByModifiedFilesNet"]`) attribute to be correlated across the nine projects.
+
+## Variable Importance
+We have already examined the importance of each feature across all projects. it is worth looking into the minimum and maximum importance of each feature, evaluated on a per-project basis.
+
+```{r}
+attrNames <- c()
+for (attrName in names(ds)[1:(length(ds) - 2)]) { # Skip label and RepoPathOrUrl
+  for (mLabel in c("a", "c", "p")) {
+    attrNames <- c(attrNames, paste(attrName, mLabel, sep = "_"))
+  }
+}
+
+# Include a first column for the project's name:
+resultsFeatures <- data.frame(
+  matrix(ncol = length(attrNames) + 1, nrow = 0), stringsAsFactors = FALSE)
+colnames(resultsFeatures) <- c("project", attrNames)
+
+
+for (p in projects) {
+  dsProj <- ds[ds$RepoPathOrUrl == p,]
+  
+  # Remove Url-feature again:
+  dsProj <- dsProj[, !names(dsProj) %in% c("RepoPathOrUrl")]
+  
+  # Train will sometimes report zero variance for variables with variance just close to zero.
+  # We have to remove those (including the zero-variance variables, too).
+  dsProj <- dsProj[, !names(dsProj) %in% nearZeroVar(dsProj, names = TRUE)]
+  
+  set.seed(31)
+  
+  control <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+  model <- train(label ~ ., data = dsProj, method = "lvq",
+                 preProcess = "scale", trControl=control)
+  importance <- varImp(model, scale=FALSE)
+  
+  newRow <- list()
+  newRow["project"] <- as.character(p)
+  # Now for each feature/attribute, store the a/c/p values
+  for (attrName in names(ds)[1:(length(ds) - 2)]) { # Skip label and RepoPathOrUrl
+    for (mLabel in c("a", "c", "p")) {
+      newRow[paste(attrName, mLabel, sep = "_")] <- importance$importance[attrName, mLabel]
+    }
+  }
+  
+  resultsFeatures <- rbind(resultsFeatures, newRow)
+  resultsFeatures$project <- as.character(resultsFeatures$project)
+}
+```
+
+We should clean up the results and remove columns that are all NA:
+
+```{r}
+naCols <- c()
+for (col in colnames(resultsFeatures)) {
+  if (all(is.na(resultsFeatures[col]))) {
+    naCols <- c(naCols, col)
+  }
+}
+
+# Those columns are all NA:
+print(naCols)
+
+# The corresponding features then are:
+naFeatures <- sapply(naCols, function(c) substr(c, 1, nchar(c) - 2), USE.NAMES = FALSE)
+
+# Let's remove the columns:
+resultsFeatures <- resultsFeatures[, !names(resultsFeatures) %in% naCols]
+```
+
+
+In order to get the min/max values per feature and label, we need to do some aggregations.
+
+```{r}
+resultsFeatureNames <- c("feature", "a_min", "c_min", "p_min", "a_max", "c_max", "p_max", "avg")
+resultsFeaturesAgg <- data.frame(
+  matrix(ncol = length(resultsFeatureNames), nrow = 0), stringsAsFactors = FALSE)
+colnames(resultsFeaturesAgg) <- resultsFeatureNames
+
+for (attrName in names(ds)[1:(length(ds) - 2)]) {
+  # Skip entire NA features:
+  if (attrName %in% naFeatures) {
+    next
+  }
+  
+  newRow <- list()
+  newRow["feature"] <- as.character(attrName)
+  
+  for (mLabel in c("a", "c", "p")) {
+    # Note that some features are removed in some projects, as they have low or no variance.
+    # This will lead to NAs in the data, and our aggregations have to ignore these.
+    
+    newRow[paste(mLabel, "min", sep = "_")] <-
+      min(resultsFeatures[paste(attrName, mLabel, sep = "_")], na.rm = TRUE)
+    newRow[paste(mLabel, "max", sep = "_")] <-
+      max(resultsFeatures[paste(attrName, mLabel, sep = "_")], na.rm = TRUE)
+  }
+  
+  newRow["avg"] <- mean(c(
+    resultsFeatures[[paste(attrName, "a", sep = "_")]],
+    resultsFeatures[[paste(attrName, "c", sep = "_")]],
+    resultsFeatures[[paste(attrName, "p", sep = "_")]]
+  ), na.rm = TRUE)
+  
+  resultsFeaturesAgg <- rbind(resultsFeaturesAgg, newRow)
+  resultsFeaturesAgg$feature <- as.character(resultsFeaturesAgg$feature)
+}
+
+# Let's generate a row that has the highest highs and lowest lows:
+newRow <- list()
+newRow["feature"] <- "_absolute"
+newRow["a_min"] <- min(resultsFeaturesAgg$a_min)
+newRow["c_min"] <- min(resultsFeaturesAgg$c_min)
+newRow["p_min"] <- min(resultsFeaturesAgg$p_min)
+newRow["a_max"] <- max(resultsFeaturesAgg$a_max)
+newRow["c_max"] <- max(resultsFeaturesAgg$c_max)
+newRow["p_max"] <- max(resultsFeaturesAgg$p_max)
+newRow["avg"] <- mean(resultsFeaturesAgg$avg)
+
+resultsFeaturesAgg <- rbind(resultsFeaturesAgg, newRow)
+resultsFeaturesAgg$feature <- as.character(resultsFeaturesAgg$feature)
+
+print(resultsFeaturesAgg)
+```
+
+From these results, we can see that the absolute minimum and maximum importances for each label are within very similar ranges, across all features (c.f. the __absolute__-row). Contrary to the cross-project variable importances, the feature __NumberOfLinesAddedByModifiedFilesNet__ is, on average, still the most important feature, but not by far (the mean decreased by about $25$%). __AffectedFilesRatioNet__ improved considerably by $45$%, while __Density__ gained only about $3$% in importance. The three most unimportant features (__`r paste(tail(rownames(importance.sorted), 3), collapse = ', ')`__) had been previously eliminated and thus did not play any role when analyzing each project separately.
+
+## Selection by building a model
+Since the variable importances changed only slightly and only for some attributes, the expected results are considered not to be significant. However, the feature selection process using RFE also yields a trained model, which will provide us with some insights into expectable classification accuracy and kappa values.
+
+```{r}
+selProjNames <- c("project", "numVars", "accuracy", "kappa", "accuracy_sd", "kappa_sd", "acc_ZeroR", "kappa_ZeroR")
+selProj <- data.frame(
+  matrix(ncol = length(selProjNames), nrow = 0), stringsAsFactors = FALSE)
+colnames(selProj) <- selProjNames
+varListProj <- list()
+
+for (p in projects) {
+  dsProj <- ds[ds$RepoPathOrUrl == p,]
+  dsProj.label <- dsProj$label
+  
+  # Remove Url-feature and label again:
+  dsProj <- dsProj[, !names(dsProj) %in% c("RepoPathOrUrl", "label")]
+  
+  # Train will sometimes report zero variance for variables with variance just close to zero.
+  # We have to remove those (including the zero-variance variables, too).
+  dsProj <- dsProj[, !names(dsProj) %in% nearZeroVar(dsProj, names = TRUE)]
+  
+  set.seed(31)
+  
+  control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
+  results <- rfe(dsProj, dsProj.label, sizes = c(1:length(dsProj)), rfeControl = control)
+  cmZeroR <- confusionMatrix(predictZeroR(dsProj.label), dsProj.label)
+  
+  varListProj[[p]] <- results$optVariables
+  rTuple <- results$results[results$optsize:results$optsize, ]
+  newRow <- list()
+  # cut same prefix and append number of variables used in parentheses
+  newRow["project"] <- paste(as.character(substr(p, 20, nchar(p) + 20)), paste("(", as.character(rTuple$Variables), ")", sep = ""))
+  newRow["numVars"] <- rTuple$Variables
+  newRow["accuracy"] <- rTuple$Accuracy
+  newRow["kappa"] <- rTuple$Kappa
+  newRow["accuracy_sd"] <- rTuple$AccuracySD
+  newRow["kappa_sd"] <- rTuple$KappaSD
+  newRow["acc_ZeroR"] <- cmZeroR$overall[["Accuracy"]]
+  newRow["kappa_ZeroR"] <- cmZeroR$overall[["Kappa"]]
+  
+  selProj <- rbind(selProj, newRow)
+  selProj$project <- as.character(selProj$project)
+}
+
+selProj$project <- as.factor(selProj$project)
+selProj <- selProj[order(selProj$numVars, decreasing = TRUE), ]
+print(selProj)
+print(varListProj)
+print(list(
+  mean_acc = mean(selProj$accuracy),
+  mean_acc_zr = mean(selProj$acc_ZeroR)
+))
+```
+
+```{r warning=FALSE}
+rotate_x(selProj, "numVars", selProj$project, 35)
+
+install.packagesCond("reshape2")
+library("reshape2")
+
+# themes: https://ggplot2.tidyverse.org/reference/ggtheme.html
+ggplot(selProj, aes(x=kappa, y=accuracy, shape=project, group=project, color=project)) +  ylab("Accuracy") + xlab("Kappa") + geom_point(size=3.5, stroke=1.5, colour="#555555") + geom_point(size=3.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + theme_light(base_size = 9) + theme(legend.position = "bottom", legend.direction = "vertical") + scale_x_continuous("Kappa", labels = c(0:8)/20, breaks = c(0:8)/20) + scale_color_brewer(palette = "Paired")
+
+
+tikzDevice::tikz('sp_AccuaryKappa.tex', width = 3.4, height = 4.5)
+ggplot(selProj, aes(x=kappa, y=accuracy, shape=project, group=project, color=project)) + ylab("Accuracy") + xlab("Kappa") + geom_point(size=3.5, stroke=1.5, colour="#555555") + geom_point(size=3.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + theme_light(base_size = 9) + theme(legend.position = "bottom", legend.direction = "vertical") + scale_x_continuous("Kappa", labels = c(0:8)/20, breaks = c(0:8)/20) + scale_color_brewer(palette = "Paired")
+dev.off()
+```
+
+The above plot clearly shows that there is a great variance for accuracy and kappa across projects, with a somewhat linear relation between the two. While the classification performance only varies by about __`r round(max(selProj$accuracy) - min(selProj$accuracy), 3)`__, the kappa goes as low as __`r round(min(selProj$kappa), 3)`__ and as high as __`r round(max(selProj$kappa), 3)`__. Following the guidelines from Landis and Koch, a value between $0$ and $0.2$ is regarded as slight, whereas a value between $0.41$ and $0.6$ is regarded as already moderate. The per-project models perform best using six features at most. Compared to the cross-project results, we observe an increase of __`r round(max(selProj$accuracy) - tail(resultsX$results, 1)$Accuracy, 3)`__ in accuracy and
+__`r round(max(selProj$kappa) - tail(resultsX$results, 1)$Kappa, 3)`__ in Kappa.

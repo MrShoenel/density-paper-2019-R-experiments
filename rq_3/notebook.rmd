@@ -1,0 +1,722 @@
+---
+title: "Experiments for RQ 3"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+
+```{r warning=FALSE}
+source("../helpers.R")
+knitr::opts_chunk$set(rows.print=25, cols.print=15)
+
+install.packagesCond("mlbench")
+library("mlbench")
+install.packagesCond("caret")
+library("caret")
+installed.packages("stringr")
+library("stringr")
+```
+
+# Research Question 3
+The overall question was __"Are the size- and especially density-related data suitable for improving the state of the art in commit classification?"__. Below are the sub-questions A-C.
+
+(A) __"Can we comprehend and reproduce the results as obtained by Levin et al.?"__
+(B) __"By extending their models with size- and density-data, does the performance improve?"__
+(C) __"Can the extended models be further tuned and pruned, so that a best-performing subset of old and new attributes can be found?"__
+
+For these experiments, we will be using the __`x1151`__ and __`jeX_L`__ datasets, which is simply the join of the original __`x1151`__ and the __`gtools_ex`__ datasets. Using that join, we get the commits' labels, original source code changes- and keyword-attributes, and the new size-related attributes.
+
+## RQ 2 (A)
+We need to establish either our own baseline in commit classification (in order to measure any improvements) or, better, reproduce the results from Levin et al. We chose to do the latter. They use a compound model, that is based on one or two submodels, of the kinds _{keywords, changes, combined}_. If two models are used, they must be distinct (i.e. a compound model with two models cannot contain two models of the same kind). However, the combinations of two models A and B in shape of _{A,B}_ and _{B,A}_ are considered to be distinct, as the classify routine depends on it.
+
+The first thing we have to do, is to build the three models and the predictor, that uses the right model according to the validation sample (c.f. listing 1 in Levin paper). We will need three different datasets, one for each model. The combined models uses the full x1151 dataset, the others only subsets of it.
+
+```{r}
+x1151 <- getDataset("x1151")
+nzv <- nearZeroVar(x1151, saveMetrics = TRUE)
+# Keep all but the zero-variance variables:
+x1151 <- x1151[, !nzv$zeroVar]
+
+# Pre-process-params (can be skipped)
+#ppp <- preProcess(x1151, method = c("center", "scale"))
+#x1151 <- predict(ppp, x1151)
+x1151$label <- as.factor(x1151$label)
+x1151$project <- as.factor(x1151$project)
+
+# The previous authors did also a 85/15 split
+partSplit <- createDataPartition(x1151$label, p = 0.85, list = FALSE)
+dsValidate <- (x1151[-partSplit, ])[, !names(x1151) %in%
+                           c("commitId", "comment", "project")]
+dsValidate.label <- dsValidate$label
+dsValidate$label <- NULL
+
+# The three datasets (note that each has the label)
+dsCombined <- x1151[partSplit, ]
+
+dsCombined.label <- dsCombined$label
+# Also, let's store the projects separately
+dsCombined.project <- dsCombined$project
+# Let's remove unused columns from x1151
+dsCombined <- dsCombined[, !names(dsCombined) %in%
+                           c("commitId", "comment", "project")]
+dsKeywords <- dsCombined[, c(1, 49:68)]
+dsChanges <- dsCombined[, 1:48]
+```
+
+Now let's build the models:
+
+```{r}
+set.seed(31)
+
+numCv <- 10 # increase later to 10 (8)
+numRep <- 5 # increase later to 5 (3)
+control <- trainControl(
+  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+
+modelCombined <- train(
+  label ~., data = dsCombined, method = "rf", trControl = control)
+modelKeywords <- train(
+  label ~., data = dsKeywords, method = "rf", trControl = control)
+modelChanges <- train(
+  label ~., data = dsChanges, method = "rf", trControl = control)
+```
+
+Let's replicate the results from Levin et al., using our Random Forest based models and their custom classifier for compound models. First, we are interested in the training performance of each compound model. To assess it, we combine the numeric votes for each class by either model and select the highest.
+
+```{r}
+modelCombined$name <- "Combined"
+modelKeywords$name <- "Keywords"
+modelChanges$name <- "Changes"
+
+compoundModels <- list(
+  comb = list(
+    l = modelCombined,
+    r = modelCombined
+  ),
+  combKw = list(
+    l = modelCombined,
+    r = modelKeywords
+  ),
+  combCh = list(
+    l = modelCombined,
+    r = modelChanges
+  ),
+  
+  kwCh = list(
+    l = modelKeywords,
+    r = modelChanges
+  ),
+  kwComb = list(
+    l = modelKeywords,
+    r = modelCombined
+  ),
+  kw = list(
+    l = modelKeywords,
+    r = modelKeywords
+  ),
+  
+  chComb = list(
+    l = modelChanges,
+    r = modelCombined
+  ),
+  chKw = list(
+    l = modelChanges,
+    r = modelKeywords
+  ),
+  ch = list(
+    l = modelChanges,
+    r = modelChanges
+  )
+)
+
+trainResultsModels <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+for (l in compoundModels) {
+  cm <- confusionMatrix(
+    dsCombined.label,
+    combineVotes(l$l$finalModel$votes, l$r$finalModel$votes), mode = "everything")
+  cmZeroR <- confusionMatrix(predictZeroR(dsCombined.label), dsCombined.label)
+  
+  newRow <- list()
+  newRow["left"] <- as.character(l$l$name)
+  newRow["right"] <- as.character(l$r$name)
+  newRow["acc"] <- cm$overall[[1]]
+  newRow["kappa"] <- cm$overall[[2]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall[[1]]
+  
+  trainResultsModels <- rbind(trainResultsModels, newRow)
+  trainResultsModels$left <- as.character(trainResultsModels$left)
+  trainResultsModels$right <- as.character(trainResultsModels$right)
+}
+```
+
+```{r}
+print(trainResultsModels)
+
+temp <- data.frame(
+  model=sapply(
+    rep(rownames(trainResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
+  type=rep(c("Accuracy", "Kappa"), nrow(trainResultsModels)),
+  value=c(rbind(trainResultsModels$acc, trainResultsModels$kappa))
+)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+
+tikzDevice::tikz('train_org.tex', width = 3.4, height = 2.4)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+dev.off()
+```
+
+We are getting very similar results w.r.t. training performance (note that we have only replicated the RandomForest-based models). However, we get significantly better results (accuracy and kappa) for the models 7 and 8. Except for these two, our replicated results appear to be within margin of error.
+
+Also, now let's use all compound models and the validation samples, to predict the labels of the previously unseen data, using the custom classifier from Levin et al.:
+
+```{r}
+validResultsModels <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+for (m in compoundModels) {
+  cm <- confusionMatrix(
+    dsValidate.label,
+    predictLevin(m$l, m$r, dsValidate), mode = "everything")
+  cmZeroR <- confusionMatrix(predictZeroR(dsValidate.label), dsValidate.label)
+  
+  newRow <- list()
+  newRow["left"] <- as.character(m$l$name)
+  newRow["right"] <- as.character(m$r$name)
+  newRow["acc"] <- cm$overall[[1]]
+  newRow["kappa"] <- cm$overall[[2]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall[[1]]
+  
+  validResultsModels <- rbind(validResultsModels, newRow)
+  validResultsModels$left <- as.character(validResultsModels$left)
+  validResultsModels$right <- as.character(validResultsModels$right)
+}
+```
+
+```{r}
+
+print(validResultsModels)
+
+temp <- data.frame(
+  model=sapply(
+    rep(rownames(validResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
+  type=rep(c("Accuracy", "Kappa"), nrow(validResultsModels)),
+  value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
+)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+
+tikzDevice::tikz('valid_org.tex', width = 3.4, height = 2.4)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+dev.off()
+```
+
+Running the validation samples from $85/15$ split through all the models yields slightly worse results, but likely within the margin of error again. Also, the split-ratio yields only $`r nrow(dsValidate)`$ validation samples, that have been chosen randomly, but with regard to the different distributions for the labels (i.e. the ratio of labels for each class is (almost) identical in both the training- and validation-datasets). We have validated all RF-based models and our champion-model is the same (Keywords + Combined). The last three changes-based models however perform constantly worse than the other models.
+
+
+## RQ 2 (B)
+We will start with a clean slate, by retrieving the __`jeX_L`__ dataset first and then dividing it again into the same sub-datasets _dsKeywords_, _dsChanges_, ___dsSizes___ and _dsCombined_, where the latter will combine features from all three sets (i.e. the full `jeX_L` dataset).
+
+```{r}
+set.seed(31)
+
+jeXL <- getDataset("jeX_L")
+
+ppp <- preProcess(jeXL, method = c("scale", "center", "zv"))
+jeXL <- predict(ppp, jeXL)
+
+jeXL$label <- as.factor(jeXL$label)
+jeXL$project <- as.factor(jeXL$project)
+jeXL <- jeXL[, !names(jeXL) %in% c("commitId", "comment", "RepoPathOrUrl")]
+
+partSplit <- createDataPartition(jeXL$label, p = 0.85, list = F)
+dsValidate <- (jeXL[-partSplit, ])[, !names(jeXL) %in% c("project")]
+dsValidate.label <- dsValidate$label
+
+# Let's prepare the 4 datasets:
+dsCombined <- jeXL[partSplit, ]
+dsCombined.label <- dsCombined$label
+dsCombined.project <- dsCombined$project
+dsCombined$project <- NULL
+
+dsChanges <- dsCombined[, c(1:48)]
+dsKeywords <- dsCombined[, c(1, 49:68)]
+dsDensity <- dsCombined[, c(1, 69:90)]
+```
+
+Now that we have the data, we go ahead and build the models:
+
+```{r}
+set.seed(31)
+numCv <- 10 # increase later to 10 (8)
+numRep <- 5 # increase later to 5 (3)
+control <- trainControl(
+  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+# Strictly speaking it is not required to rebuild and retrain the modelKeywords and modelChanges,
+# as those are not affected by the additional attributes. We are still doing it, as the datasets
+# may be recreated using some specific preprocessing.
+modelCombined <- train(
+  label ~., data = dsCombined, method = "rf", trControl = control)
+modelKeywords <- train(
+  label ~., data = dsKeywords, method = "rf", trControl = control)
+modelChanges <- train(
+  label ~., data = dsChanges, method = "rf", trControl = control)
+modelDensity <- train(
+  label ~., data = dsDensity, method = "rf", trControl = control)
+```
+
+We are extending the list of compound models now the following way:
+
+* Add a pair for each other type with the `modelDensity` as right model.
+* Create three pairs where the left model is `modelDensity` and the left model is `modelKeywords`, `modelChanges` and `modelCombined`.
+* Add a purely density-related compound model, where the left and right models are both `modelDensity`.
+
+We will continue using the custom classify method, that selects the left model for samples that use keywords, and the right model, otherwise. In the following section, we report the training performance of each model.
+
+```{r}
+modelCombined$name <- "Combined"
+modelKeywords$name <- "Keywords"
+modelChanges$name <- "Changes"
+modelDensity$name <- "Density"
+
+compoundModels <- list(
+  comb = list(
+    l = modelCombined,
+    r = modelCombined
+  ),
+  combKw = list(
+    l = modelCombined,
+    r = modelKeywords
+  ),
+  combCh = list(
+    l = modelCombined,
+    r = modelChanges
+  ),
+  combDen = list(
+    l = modelCombined,
+    r = modelDensity
+  ),
+  
+  kwCh = list(
+    l = modelKeywords,
+    r = modelChanges
+  ),
+  kwComb = list(
+    l = modelKeywords,
+    r = modelCombined
+  ),
+  kw = list(
+    l = modelKeywords,
+    r = modelKeywords
+  ),
+  kwDen = list(
+    l = modelKeywords,
+    r = modelDensity
+  ),
+  
+  chComb = list(
+    l = modelChanges,
+    r = modelCombined
+  ),
+  chKw = list(
+    l = modelChanges,
+    r = modelKeywords
+  ),
+  ch = list(
+    l = modelChanges,
+    r = modelChanges
+  ),
+  chDen = list(
+    l = modelChanges,
+    r = modelDensity
+  ),
+  
+  denComb = list(
+    l = modelDensity,
+    r = modelCombined
+  ),
+  denKw = list(
+    l = modelDensity,
+    r = modelKeywords
+  ),
+  denCh = list(
+    l = modelDensity,
+    r = modelChanges
+  ),
+  den = list(
+    l = modelDensity,
+    r = modelDensity
+  )
+)
+
+trainResultsModels <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+for (l in compoundModels) {
+  cm <- confusionMatrix(
+    dsCombined.label,
+    combineVotes(l$l$finalModel$votes, l$r$finalModel$votes), mode = "everything")
+  cmZeroR <- confusionMatrix(predictZeroR(dsCombined.label), dsCombined.label)
+  
+  newRow <- list()
+  newRow["left"] <- as.character(l$l$name)
+  newRow["right"] <- as.character(l$r$name)
+  newRow["acc"] <- cm$overall[[1]]
+  newRow["kappa"] <- cm$overall[[2]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall[[1]]
+  
+  trainResultsModels <- rbind(trainResultsModels, newRow)
+  trainResultsModels$left <- as.character(trainResultsModels$left)
+  trainResultsModels$right <- as.character(trainResultsModels$right)
+}
+```
+
+```{r}
+print(trainResultsModels)
+
+temp <- data.frame(
+  model=sapply(
+    rep(rownames(trainResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
+  type=rep(c("Accuracy", "Kappa"), nrow(trainResultsModels)),
+  value=c(rbind(trainResultsModels$acc, trainResultsModels$kappa))
+)
+
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+
+tikzDevice::tikz('trainWithDen_org.tex', width = 3.4, height = 2.4)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+dev.off()
+```
+
+The results obtained during training including the density-based models was slightly deviating from the training results without such models. We can observe slight declines and slight improvements. What is interesting though, is that the classification performance can improve vastly in compound models, where the left model is density, and the right model is based on combined changes or keywords. The density-only model performs as in our previous experiments. Adding other code-related features to it, such as the changes, does not significantly improve the performance. Actually, change- and density-based models seem to complement each other, as we can observe the same effect for change-only models, when adding the density model (similar performance and similar gains). This comes as no surprise, as we have already pointed out strong positive correlations between some features of either dataset (i.e. some of the attributes measure very similar things).
+
+The real interesting point here may then, whether taking density instead of changes is a good substitute for compound models. Models 5 and 8 perform similar and thus it might be worth to use density instead, as it can be obtained comparatively cheap.
+
+Now we will use the validation samples to obtain model performances on previously unseen data:
+
+```{r}
+validResultsModels <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+for (m in compoundModels) {
+  cm <- confusionMatrix(
+    dsValidate.label,
+    predictLevin(m$l, m$r, dsValidate), mode = "everything")
+  cmZeroR <- confusionMatrix(predictZeroR(dsValidate.label), dsValidate.label)
+  
+  newRow <- list()
+  newRow["left"] <- as.character(m$l$name)
+  newRow["right"] <- as.character(m$r$name)
+  newRow["acc"] <- cm$overall[[1]]
+  newRow["kappa"] <- cm$overall[[2]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall[[1]]
+  
+  validResultsModels <- rbind(validResultsModels, newRow)
+  validResultsModels$left <- as.character(validResultsModels$left)
+  validResultsModels$right <- as.character(validResultsModels$right)
+}
+```
+
+```{r}
+print(validResultsModels)
+
+# ggplot it:
+temp <- data.frame(
+  model=sapply(
+    rep(rownames(validResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
+  type=rep(c("Accuracy", "kappa"), nrow(validResultsModels)),
+  value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
+)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+
+tikzDevice::tikz('validWithDen_org.tex', width = 3.4, height = 2.4)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + theme(legend.position="bottom")
+dev.off()
+```
+
+After passing the validation samples through the trained models, we can observe that the model 8 performs best. The results are almost the same compared to the previous champion-model that uses the keywords- and/or (only) combined-models. Interesting however is, that we seem to be able to swap out code-changes for density, which might be worth as to the lower cost of obtaining it. When further comparing models 9 through 12 and 13 through 16, we observe very similar performances with either changes- resp. density-based models on the left, which is another hint at the interchangeability of these kinds of models. Overall, we are observing a drop in performance in models 9 through 16, all of which use either changes or density as their left model.
+
+## RQ 2 (C)
+The last part of RQ2 is about attempting to improve the performance of a model, that includes all types of attributes (keywords, changes, density). The exact question was: _"Can the extended models be further tuned andpruned, so that a best-performing subset of old and new attributes can be found?"_
+
+We are going to perform a recursive feature elimination (RFE) using up to 30+ variables (we have 89 variables available) first, to select the best predictors for further model tuning.
+
+### RFE
+Before we consider the 30+ top-most important variables, we'll leave out the zero- and near-zero-variance predictors.
+
+```{r}
+set.seed(31)
+
+install.packagesCond("randomForest")
+
+netCols <- mapply(function(x) return(grepl("Net$", x)), colnames(dsCombined))
+colsNamesNet <- colnames(dsCombined)[netCols]
+colsNamesGross <- as.vector(mapply(function(x) return(substr(x, 1, nchar(x)-3)), colsNamesNet))
+
+dsTune <- dsCombined[, !names(dsCombined) %in% colsNamesGross]
+
+# Kick out zero- and near-zero variables:
+nzv <- nearZeroVar(dsTune, saveMetrics = T)
+dsTune <- dsTune[, !Reduce("|", list(a = nzv$zeroVar, b = nzv$nzv))]
+
+# Pre-process-params (can be skipped)
+# (We are leaving this out as the results are better without it)
+#ppp <- preProcess(dsTune, method = c("center", "scale"))
+#dsTune <- predict(ppp, dsTune)
+
+# After this step, we only had a few more than just 30 variables, so we kept them all
+# instead of imposing a hard limit of 30.
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 5, repeats = 3)
+results <- rfe(dsTune[, 2:ncol(dsTune)], dsCombined.label, sizes = c(1:(ncol(dsTune)-1)), rfeControl = control)
+
+print(results)
+plot(results, type=c("g", "o"))
+```
+
+The RFE yields a best model that uses `r results$optsize` variables. Those are:
+
+```{r}
+print(results$variables[1:(results$optsize), ])
+```
+
+### Trying of different models
+We have previously seen strong results using _LogitBoost_. Also we want to attempt tuning a _Random Forest_ and using an ensemble of classifiers.
+
+
+#### RF
+```{r}
+bestmtry <- randomForest::tuneRF(
+  dsTune[, 2:(ncol(dsTune))], dsTune[, 1], stepFactor = 1.5, improve = 1e-5, ntreeTry = 1000, trace = F)
+print(bestmtry)
+
+# extract exact value:
+bestmtry <- which.min(bestmtry)
+
+numCv <- 10 # increase later to 10 (8)
+numRep <- 5 # increase later to 5 (3)
+control <- trainControl(
+  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+modelRf <- train(
+  label ~., data = dsTune, method = "rf",
+  tuneGrid = expand.grid(.mtry = c((bestmtry-2):(bestmtry+2))), trControl = control)
+
+cm <- confusionMatrix(predictZeroR(dsValidate.label), dsValidate.label)
+print(cm)
+cm <- confusionMatrix(dsValidate.label, predict(modelRf, dsValidate), mode = "everything")
+print(cm)
+```
+
+
+#### Various
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+trainMethods <- c("svmRadial", "svmLinear", "gbm", "nnet", "mda", "C5.0", "xgbTree", "lssvmRadial", "avNNet", "lda", "naive_bayes", "LogitBoost")
+trainResults <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = F)
+
+numCv <- 10 # increase later to 10 (8)
+numRep <- 5 # increase later to 5 (3)
+
+control <- trainControl(
+  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+for (method in trainMethods) {
+  
+  modelTemp <- train(
+    label ~., data = dsTune, method = method, trControl = control, verbose = F)
+  
+  cm <- confusionMatrix(dsValidate.label, predict(modelTemp, dsValidate))
+  cmZeroR <- confusionMatrix(predictZeroR(dsValidate.label), dsValidate.label)
+  
+  newRow <- list()
+  newRow["method"] <- method
+  newRow["acc"] <- cm$overall["Accuracy"][[1]]
+  newRow["kappa"] <- cm$overall["Kappa"][[1]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall["Accuracy"][[1]]
+  newRow["numClassified"] <- sum(cm$table)
+  
+  trainResults <- rbind(trainResults, newRow)
+  trainResults$method <- as.character(trainResults$method)
+}
+```
+
+
+Using _LogitBoost_, we achieve an accuracy of `r round(100 * cm$overall["Accuracy"][[1]], 2)` % and a kappa of `r round(cm$overall["Kappa"][[1]], 3)` using the validation samples, which is a new best value. However, the LogitBoost method is based on a voting scheme, which results in ties for some of the validation samples. In that case, NA is returned, which is ignored by the confusion matrix.
+
+
+```{r}
+print(trainResults)
+```
+
+
+```{r}
+set.seed(31)
+numCv <- 10 # increase later to 10 (8)
+numRep <- 5 # increase later to 5 (3)
+control <- trainControl(
+  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+# If we train the 'modelCombined' with the 'dsTune' dataset, the results are slightly worse.
+modelCombined <- train(
+  label ~., data = dsCombined, method = "LogitBoost", trControl = control)
+modelKeywords <- train(
+  label ~., data = dsKeywords, method = "LogitBoost", trControl = control)
+modelChanges <- train(
+  label ~., data = dsChanges, method = "LogitBoost", trControl = control)
+modelDensity <- train(
+  label ~., data = dsDensity, method = "LogitBoost", trControl = control)
+
+```
+
+```{r}
+modelCombined$name <- "Combined"
+modelKeywords$name <- "Keywords"
+modelChanges$name <- "Changes"
+modelDensity$name <- "Density"
+
+compoundModels <- list(
+  comb = list(
+    l = modelCombined,
+    r = modelCombined
+  ),
+  combKw = list(
+    l = modelCombined,
+    r = modelKeywords
+  ),
+  combCh = list(
+    l = modelCombined,
+    r = modelChanges
+  ),
+  combDen = list(
+    l = modelCombined,
+    r = modelDensity
+  ),
+  
+  kwCh = list(
+    l = modelKeywords,
+    r = modelChanges
+  ),
+  kwComb = list(
+    l = modelKeywords,
+    r = modelCombined
+  ),
+  kw = list(
+    l = modelKeywords,
+    r = modelKeywords
+  ),
+  kwDen = list(
+    l = modelKeywords,
+    r = modelDensity
+  ),
+  
+  chComb = list(
+    l = modelChanges,
+    r = modelCombined
+  ),
+  chKw = list(
+    l = modelChanges,
+    r = modelKeywords
+  ),
+  ch = list(
+    l = modelChanges,
+    r = modelChanges
+  ),
+  chDen = list(
+    l = modelChanges,
+    r = modelDensity
+  ),
+  
+  denComb = list(
+    l = modelDensity,
+    r = modelCombined
+  ),
+  denKw = list(
+    l = modelDensity,
+    r = modelKeywords
+  ),
+  denCh = list(
+    l = modelDensity,
+    r = modelChanges
+  ),
+  den = list(
+    l = modelDensity,
+    r = modelDensity
+  )
+)
+
+
+
+validResultsModels <- data.frame(
+  matrix(ncol = 5, nrow = 0), stringsAsFactors = FALSE)
+
+for (m in compoundModels) {
+  cm <- confusionMatrix(
+    dsValidate.label,
+    predictLevin(m$l, m$r, dsValidate), mode = "everything")
+  cmZeroR <- confusionMatrix(predictZeroR(dsValidate.label), dsValidate.label)
+  
+  newRow <- list()
+  newRow["left"] <- as.character(m$l$name)
+  newRow["right"] <- as.character(m$r$name)
+  newRow["acc"] <- cm$overall[[1]]
+  newRow["kappa"] <- cm$overall[[2]]
+  newRow["acc_ZeroR"] <- cmZeroR$overall[[1]]
+  
+  validResultsModels <- rbind(validResultsModels, newRow)
+  validResultsModels$left <- as.character(validResultsModels$left)
+  validResultsModels$right <- as.character(validResultsModels$right)
+}
+```
+
+```{r}
+print(validResultsModels)
+
+# ggplot it:
+temp <- data.frame(
+  model=sapply(
+    rep(rownames(validResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
+  type=rep(c("Accuracy", "Kappa"), nrow(validResultsModels)),
+  value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
+)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+
+tikzDevice::tikz('validOptimWithDen_org.tex', width = 3.4, height = 2.4)
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+dev.off()
+```
+
+```{r}
+champion <- validResultsModels[which.max(apply(validResultsModels, MARGIN=1, min)), ]
+```
+
+We have now found a new champion model that achieves an accuracy of `r round(100 * champion$acc, 2)` % and a kappa of `r round(champion$kappa, 3)` (values equal to or larger than $0.81$ are considered "almost perfect").
+
+# T-SNE
+Here we add some preliminary `t-SNE` tests.
+
+```{r}
+install.packagesCond("Rtsne")
+library("Rtsne")
+
+tsneTrain <- dsDensity[, -1]
+tsne <- Rtsne(
+  tsneTrain, dims = 2, perplexity=300, verbose=TRUE, max_iter=500, check_duplicates=F)
+
+plot(tsne$Y, t='n',main="tsne")
+text(tsne$Y, labels=dsCombined$label, col=colors[dsCombined.label])
+
+ggplot(
+  data.frame(
+    x = tsne$Y[, 1],
+    y = tsne$Y[, 2],
+    label = dsDensity$label
+  )
+) + geom_point(aes(x = x, y = y, color = label), size = 2.5) + theme_light() + scale_fill_brewer(palette = "Paired")
+```
