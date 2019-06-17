@@ -42,7 +42,7 @@ barplot(labelDist)
 ## First Part
 We are following Herraiz et al. for determining if the evolutionary patterns are the same for classifying commits, w.r.t. number of files and lines of code. We are approaching this by plotting the density of gross- and net-amount of files and gross- and net-amount of lines of code.
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 install.packagesCond("dplyr")
 library("dplyr")
 install.packagesCond("plyr")
@@ -54,21 +54,24 @@ library("tikzDevice")
 ```
 
 ```{r}
+density_alpha <- 0.33
+use_palette <- "Paired"
+
 s_nf <- summary(ds$NetFiles)
 mu_nf <- ddply(ds, "label", summarise, grp.mean=mean(NetFiles))
-nf <- ggplot(data.frame(NetFiles=ds$NetFiles+0.1,Type=ds$label), aes(NetFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Net-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_nf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+nf <- ggplot(data.frame(NetFiles=ds$NetFiles+0.1,Type=ds$label), aes(NetFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=density_alpha,position="fill") + ylab("Density") + xlab("Net-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_nf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = use_palette) + scale_fill_brewer(palette = use_palette) + annotation_logticks(sides="b")
 
 s_gf <- summary(ds$GrossFiles)
 mu_gf <- ddply(ds, "label", summarise, grp.mean=mean(GrossFiles))
-gf <- ggplot(data.frame(GrossFiles=ds$GrossFiles,Type=ds$label), aes(GrossFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Gross-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+gf <- ggplot(data.frame(GrossFiles=ds$GrossFiles,Type=ds$label), aes(GrossFiles, color=Type,fill=Type)) + geom_density(size=1,alpha=density_alpha,position="fill") + ylab("Density") + xlab("Gross-Size, Files") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gf, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = use_palette) + scale_fill_brewer(palette = use_palette) + annotation_logticks(sides="b")
 
 s_ns <- summary(ds$NetSize)
 mu_ns <- ddply(ds, "label", summarise, grp.mean=mean(NetSize))
-ns <- ggplot(data.frame(NetSize=ds$NetSize+0.1,Type=ds$label), aes(NetSize, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Net-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_ns, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+ns <- ggplot(data.frame(NetSize=ds$NetSize+0.1,Type=ds$label), aes(NetSize, color=Type,fill=Type)) + geom_density(size=1,alpha=density_alpha,position="fill") + ylab("Density") + xlab("Net-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_ns, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = use_palette) + scale_fill_brewer(palette = use_palette) + annotation_logticks(sides="b")
 
 s_gs <- summary(ds$GrossSize)
 mu_gs <- ddply(ds, "label", summarise, grp.mean=mean(GrossSize))
-gs <- ggplot(data.frame(GrossSize=ds$GrossSize,Type=ds$label), aes(GrossSize, color=Type,fill=Type)) + geom_density(size=1,alpha=0.1,position="fill") + ylab("Density") + xlab("Gross-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gs, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = "Paired") + scale_fill_brewer(palette = "Paired") + annotation_logticks(sides="b")
+gs <- ggplot(data.frame(GrossSize=ds$GrossSize,Type=ds$label), aes(GrossSize, color=Type,fill=Type)) + geom_density(size=1,alpha=density_alpha,position="fill") + ylab("Density") + xlab("Gross-Size, LOC") + theme_light(base_size = 9) + scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),labels = scales::trans_format("log10", scales::math_format(10^.x))) + geom_vline(data=mu_gs, aes(xintercept=grp.mean,color=label), size=1,linetype="dashed") + scale_color_brewer(palette = use_palette) + scale_fill_brewer(palette = use_palette) + annotation_logticks(sides="b")
 
 gridExtra::grid.arrange(gf, gs, nf, ns, nrow=2)
 
@@ -147,7 +150,7 @@ Every tenth commit is a small change (i.e. only one line affected). Are net-size
 Here we will check what the probabiltiy of a certain kind of commit in a certain size-range is.
 ```{r}
 size <- nrow(ds)
-ranges <- c(0, 1, 2, 4, 8, 15, 25, 50, 75, 100)
+ranges <- c(0, 1, 2, 3, 4, 5, 8, 10, 15, 25, 50, 75, 100, 200, 500, 1000, 3000, 10000)
 
 ecdfNet <- ecdf(ds$NetSize)
 ecdfGro <- ecdf(ds$GrossSize)
@@ -182,9 +185,11 @@ print(ecdfTable)
 # Now let's plot them:
 temp <- ecdfTable[order(ecdfTable$label, ecdfTable$max), ]
 
-gro_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=gro)) + theme_light(base_size = 9) + scale_fill_brewer(palette = "Paired") + ylab("Ratio") + xlab("Gross-size, LOC, ecdf(x)") + labs(fill="Type")
+density_alpha <- 0.5
 
-net_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=net)) + theme_light(base_size = 9) + scale_fill_brewer(palette = "Paired") + ylab("Ratio") + xlab("Net-size, LOC, ecdf(x)") + labs(fill="Type")
+gro_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=gro), alpha = density_alpha, width = .85) + theme_light(base_size = 9) + scale_fill_brewer(palette = use_palette) + ylab("Ratio") + xlab("Gross-size, LOC, $ecdf(x)$") + labs(fill="Type") + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
+
+net_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=net), alpha = density_alpha, width = .85) + theme_light(base_size = 9) + scale_fill_brewer(palette = use_palette) + ylab("Ratio") + xlab("Net-size, LOC, $ecdf(x)$") + labs(fill="Type") + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
 
 gridExtra::grid.arrange(gro_et, net_et, nrow=2)
 
@@ -229,10 +234,12 @@ temp1 <- data.frame(
   value = as.vector(rbind(temp$net, temp$gro))
 )
 
-ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Size, LOC, ecdf(x)") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + ylim(0,0.8)
+density_alpha <- 0.66
+
+ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity", alpha = density_alpha) + theme_light(base_size = 9) + xlab("Size, LOC, $ecdf(x)$") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
 
 tikzDevice::tikz('ratio_range_commit.tex', width = 3.4, height = 2)
-ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Size, LOC, ecdf(x)") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + ylim(0,0.8)
+ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity", alpha = density_alpha) + theme_light(base_size = 9) + xlab("Size, LOC, $ecdf(x)$") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
 dev.off()
 ```
 

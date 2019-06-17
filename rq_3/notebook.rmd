@@ -430,13 +430,13 @@ print(validResultsModels)
 temp <- data.frame(
   model=sapply(
     rep(rownames(validResultsModels), each=2), function(x) str_pad(x, 2, side="left", pad = "0"), simplify = T),
-  type=rep(c("Accuracy", "kappa"), nrow(validResultsModels)),
+  type=rep(c("Accuracy", "Kappa"), nrow(validResultsModels)),
   value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
 )
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity", alpha = 0.66) + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 0.8, 0.1), limits = c(0, 0.8))
 
 tikzDevice::tikz('validWithDen_org.tex', width = 3.4, height = 2.4)
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + theme(legend.position="bottom")
+ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity", alpha = 0.66) + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + theme(legend.position="bottom") + scale_y_continuous(breaks = seq(0, 0.8, 0.1), limits = c(0, 0.8))
 dev.off()
 ```
 

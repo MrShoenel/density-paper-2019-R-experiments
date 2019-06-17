@@ -291,6 +291,11 @@ resultsFeaturesAgg <- data.frame(
   matrix(ncol = length(resultsFeatureNames), nrow = 0), stringsAsFactors = FALSE)
 colnames(resultsFeaturesAgg) <- resultsFeatureNames
 
+
+# In this one, we'll be storing all values for a,c,p so that we can do box-plots:
+resultsAllVals <- data.frame(matrix(ncol = 2, nrow = 0), stringsAsFactors = FALSE)
+colnames(resultsAllVals) <- c("label", "value")
+
 for (attrName in names(ds)[1:(length(ds) - 2)]) {
   # Skip entire NA features:
   if (attrName %in% naFeatures) {
@@ -308,6 +313,15 @@ for (attrName in names(ds)[1:(length(ds) - 2)]) {
       min(resultsFeatures[paste(attrName, mLabel, sep = "_")], na.rm = TRUE)
     newRow[paste(mLabel, "max", sep = "_")] <-
       max(resultsFeatures[paste(attrName, mLabel, sep = "_")], na.rm = TRUE)
+    
+    for (rfRow in c(na.omit(resultsFeatures[paste(attrName, mLabel, sep = "_")][,]))) {
+      newAllResultsRow <- list()
+      newAllResultsRow["label"] <- mLabel
+      newAllResultsRow["value"] <- rfRow
+      
+      resultsAllVals <- rbind(resultsAllVals, newAllResultsRow)
+      resultsAllVals$label <- as.character(resultsAllVals$label)
+    }
   }
   
   newRow["avg"] <- mean(c(
@@ -335,6 +349,33 @@ resultsFeaturesAgg <- rbind(resultsFeaturesAgg, newRow)
 resultsFeaturesAgg$feature <- as.character(resultsFeaturesAgg$feature)
 
 print(resultsFeaturesAgg)
+```
+
+```{r}
+# Draw some box-plots of the acp-labels:
+install.packagesCond("plyr")
+library("plyr")
+temp <- data.frame(
+    #Type = as.factor(mapvalues(resultsAllVals$label, from = c("a", "c", "p"), to = c("adaptive", "corrective", "perfective"))),
+    Type = as.factor(resultsAllVals$label),
+    value = resultsAllVals$value
+)
+
+bp <- ggplot(temp, aes(x=Type, y=value, color=Type)) +
+    geom_boxplot(aes(fill = Type), alpha = 0.33) +
+    scale_color_brewer(palette = "Paired") +
+    scale_fill_brewer(palette = "Paired") +
+    theme_light(base_size = 9) +
+    geom_jitter(shape=21, position = position_jitter(0.2)) +
+    xlab(element_blank()) + ylab("Value") +
+    scale_x_discrete(labels = c()) +
+    scale_y_continuous(breaks=seq(0.5,0.9,0.05))
+
+bp
+
+tikzDevice::tikz('acp_boxplots.tex', width = 3.4, height = 2.1)
+bp
+dev.off()
 ```
 
 From these results, we can see that the absolute minimum and maximum importances for each label are within very similar ranges, across all features (c.f. the __absolute__-row). Contrary to the cross-project variable importances, the feature __NumberOfLinesAddedByModifiedFilesNet__ is, on average, still the most important feature, but not by far (the mean decreased by about $25$%). __AffectedFilesRatioNet__ improved considerably by $45$%, while __Density__ gained only about $3$% in importance. The three most unimportant features (__`r paste(tail(rownames(importance.sorted), 3), collapse = ', ')`__) had been previously eliminated and thus did not play any role when analyzing each project separately.
