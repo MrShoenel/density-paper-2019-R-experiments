@@ -1,0 +1,1070 @@
+---
+title: "Experiments for RQ 4"
+output:
+  html_document:
+    df_print: kable
+    number_sections: true
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+# Research Question 4
+The question was the following: ___"What is the impact of taking size-related features of previous commits into acount, when attempting to predict the current label?"___
+
+For this experiment, we are taking parent commits (generations) into account, when attempting to predict the label of a commit. The commit we are trying to label is called the __principal commit__. It will come from one of the three datasets __`x1151`__ (case A), __`geX_L`__ (case B) or __`jeX_L`__ (case C) and previous generations will be appended to it from the __`geX`__ dataset. We will use up to 1, 2, 3, 5 and 8 generations of direct preceding commits for our experiments.
+
+Using an RFE approach, we will determine which features (e.g., code-changes, keywords, net-/gross-size etc.) in which generation are of importance. We will do this cross-project and for each project separately.
+
+```{r warning=FALSE}
+source("../helpers.R")
+install.packagesCond("knitr")
+library("knitr")
+knitr::opts_chunk$set(rows.print=25, cols.print=15)
+# This is in inches!
+tikzWidth1Col <- 3.48 # 3.487..
+tikzWidth2Col <- 7.2 # 7.22433 original/maximal
+```
+
+# Prepare the datasets and functions
+We will end up with `3 (A,B,C) x 5 (1,2,3,5,8) = 15` datasets. To run this experiment, we iterate these lists and build each permutation. To keep all this concise, we define functions that do cross- and per-project analyses for the loop to jump into, first.
+
+
+## The functions
+
+```{r warning=FALSE}
+install.packagesCond("mlbench")
+library("mlbench")
+install.packagesCond("caret")
+library("caret")
+install.packagesCond("e1071")
+library("e1071")
+
+maxCols <- 40 # 40
+rfeFolds <- 10 # 10
+rfeRepeats <- 5 # 5
+
+control <- rfeControl(
+  functions = rfFuncs, method = "cv", number = rfeFolds, repeats = rfeRepeats)
+
+
+analyzeCrossProject <- function(ds, labels) {
+  # attempt to try sets of attributes between 1 and all attributes of size
+  
+  set.seed(1337)
+  results <- rfe(
+    ds, labels, sizes = c(1:min(maxCols, length(ds))), rfeControl = control)
+  
+  #print(results)
+  #plot(results, type = c("g", "o"))
+  
+  return(results)
+}
+
+
+analyzeSingleProject <- function(ds, labels, repos, maxCols, control, dsName) {
+  
+  cluster <- makeCluster(length(unique(repos)))
+  registerDoParallel(cluster)
+  
+  resultsForEachProject <- foreach(repo = repos, .packages = c("foreach", "doParallel", "parallel", "caret")) %dopar%
+  {
+    projectRows <- ds$RepoPathOrUrl == repo
+    projectData <- ds[projectRows, ]
+    projectLabels <- labels[projectRows]
+    
+    projectData <- projectData[, !grepl("RepoPathOrUrl", names(projectData))]
+    
+    nzv <- nearZeroVar(projectData, saveMetrics = T)
+    projectData <- projectData[, !(nzv$zeroVar | nzv$nzv)]
+    
+    result <- c(dsName, as.character(repo))
+    tryCatch({
+      set.seed(1337)
+      result <- rfe(projectData, projectLabels,
+        sizes = c(1:min(maxCols, length(projectRows))), rfeControl = control)
+      result$repo <- as.character(repo)
+    }, error = function(cond) {
+      str(cond)
+    })
+    
+    return(result)
+  }
+
+  stopCluster(cluster)
+  
+  return(resultsForEachProject)
+}
+```
+
+
+## The datasets
+
+```{r warning=FALSE}
+install.packagesCond("gbm")
+library("gbm")
+install.packagesCond("MASS")
+library("MASS")
+install.packagesCond("e1071")
+library("e1071")
+install.packagesCond("foreach")
+library("foreach")
+install.packagesCond("randomForest")
+library("randomForest")
+install.packagesCond("doParallel")
+library("doParallel")
+
+abc <- c("a", "b", "c", "d")
+generations <- c(1, 2, 3, 5, 8)
+removeNames <- c("commitId", "comment")
+
+dsNames <- c()
+
+for (dsType in abc) {
+  for (gen in generations) {
+    dsName <- paste("rq4", dsType, paste("gen", gen, sep = ""), sep = "_")
+    dsNames <- c(dsNames, dsName)
+  }
+}
+```
+
+## Compute RFE across projects using many generations
+
+Here, we compute the RFE for all A/B/C/D datasets across projects.
+
+```{r}
+allResultsCrossProject <- NULL
+if (file.exists("allResultsCrossProject.rds")) {
+  allResultsCrossProject <- readRDS("allResultsCrossProject.rds")
+} else {
+  # The parallel stuff
+  cluster <- makeCluster(detectCores())
+  registerDoParallel(cluster)
+  
+  allResultsCrossProject <- foreach(
+    dsName = dsNames, .packages = c("RMariaDB", "caret")) %dopar%
+  {
+    print(paste("Getting dataset:", dsName))
+    ds <- getDataset(dsName)
+    
+    ds.label <- as.factor(ds$label)
+    ds <- ds[, !names(ds) %in% c(removeNames, "label", "project", "comment")]
+    ds <- ds[, !grepl("RepoPathOrUrl", names(ds))]
+    
+    nzv <- nearZeroVar(ds, saveMetrics = T)
+    ds <- ds[, !(nzv$zeroVar | nzv$nzv)]
+    
+    analyzeCrossProject(ds, ds.label)
+  }
+  
+  saveRDS(allResultsCrossProject, "allResultsCrossProject.rds")
+  
+  stopCluster(cluster)
+}
+
+
+```
+
+## Compute RFE for each single project in each A/B/C/D dataset
+
+Here, we do the same as previously. However, we attempt an RFE analysis for each project within the datasets.
+
+```{r}
+
+allResultsSingleProject <- NULL
+if (file.exists("allResultsSingleProject.rds")) {
+  allResultsSingleProject <- readRDS("allResultsSingleProject.rds")
+} else {
+  # The parallel stuff
+  cluster <- makeCluster(min(detectCores(), 6))
+  registerDoParallel(cluster)
+
+  allResultsSingleProject <- foreach(
+    dsName = dsNames, .packages = c("RMariaDB", "caret", "parallel", "doParallel", "foreach")) %dopar%
+  {
+    ds <- getDataset(dsName)
+    
+    ds.label <- as.factor(ds$label)
+    ds.repo <- as.factor(ds$RepoPathOrUrl)
+    ds <- ds[, !names(ds) %in% c(removeNames, "label", "project", "comment")]
+    
+    analyzeSingleProject(ds, ds.label, unique(ds.repo), maxCols, control, dsName)
+  }
+  
+  saveRDS(allResultsSingleProject, "allResultsSingleProject.rds")
+  
+  stopCluster(cluster)
+  
+}
+
+
+```
+
+## Clean some results
+```{r}
+# After this, a few projects may not work (in our tests, it always was
+# RxJava in the 8th generation of each dataset). Let's remove those:
+
+temp <- list()
+for (ds in c(1:length(allResultsSingleProject))) {
+  for (proj in c(1:length(allResultsSingleProject[[ds]]))) {
+    if (!is.list(allResultsSingleProject[[ds]][[proj]])) {
+      temp[[paste(ds, proj)]] <- c(ds, proj)
+    }
+  }
+}
+
+for (foo in temp) {
+  allResultsSingleProject[[foo[1]]][[foo[2]]] <- NULL
+}
+```
+
+# Evaluation of the Results
+In this section, we will analyze the results from cross- and single-projects. Also, we are defining some common functions here.
+
+```{r}
+install.packagesCond("ggplot2")
+library("ggplot2")
+install.packagesCond("egg")
+library("egg")
+
+ggplotRFE <- function(rfeDs) {
+  results <- rfeDs$results
+  
+  ggplot() +
+    geom_line(data=results, aes(x=Variables,y=Accuracy), size=1,color='#888888') +
+    #geom_point(data=results, aes(x=Variables,y=Accuracy), size=1,
+    #           colour="#555555", shape=16) + theme_light(base_size = 9) +
+    geom_line(data=results, aes(x=Variables,y=Kappa), size=1,color='#cc0000') +
+    #geom_point(data=results, aes(x=Variables,y=Kappa), size=1,
+    #           colour="#990000", shape=17) +
+    theme_light(base_size = 9) +
+    scale_x_log10() +
+    scale_y_continuous(labels = seq(0, 1, by=0.1), breaks = seq(0, 1, by=0.1)) +
+    #ylab("Accuracy (circles) and Kappa (triangles)")
+    xlab("") + ylab("")
+}
+```
+
+## Cross-project
+We are interested in the following:
+
+* Performance combined for A/B/C/D datasets
+* Gross vs. Net: Which attributes are retained most often
+* Optimal model size (number of variables)
+
+To outline the results we will do this:
+
+* Plot accuracy/kappa for each model (1,2,3,5,8) of each dataset (A,B,C,D) (plot-matrix)
+* Plot another matrix but show a barchart of amount of features retained in each generation, with an accompanying bar for the amount of net-features
+* Produce a table that maps to that matrix, where in each cell we state the size of the model (optimimum number of variables), how many of those were from previous generations (sum) and the ratio of net-variables thereof
+* Produce a table/box plot for each dataset, having aggregated the accuracy/kappa of each model (so we get min/max/average/median etc.)
+
+### Plots for Accuracy/Kappa:
+```{r}
+gridExtra::grid.arrange(
+  ggplotRFE(allResultsCrossProject[[1]]),
+  ggplotRFE(allResultsCrossProject[[2]]),
+  ggplotRFE(allResultsCrossProject[[3]]),
+  ggplotRFE(allResultsCrossProject[[4]]),
+  ggplotRFE(allResultsCrossProject[[5]]),
+  ggplotRFE(allResultsCrossProject[[6]]),
+  ggplotRFE(allResultsCrossProject[[7]]),
+  ggplotRFE(allResultsCrossProject[[8]]),
+  ggplotRFE(allResultsCrossProject[[9]]),
+  ggplotRFE(allResultsCrossProject[[10]]),
+  ggplotRFE(allResultsCrossProject[[11]]),
+  ggplotRFE(allResultsCrossProject[[12]]),
+  ggplotRFE(allResultsCrossProject[[13]]),
+  ggplotRFE(allResultsCrossProject[[14]]),
+  ggplotRFE(allResultsCrossProject[[15]]),
+  ggplotRFE(allResultsCrossProject[[16]]),
+  ggplotRFE(allResultsCrossProject[[17]]),
+  ggplotRFE(allResultsCrossProject[[18]]),
+  ggplotRFE(allResultsCrossProject[[19]]),
+  ggplotRFE(allResultsCrossProject[[20]]),
+  
+  nrow = 4
+)
+```
+
+#### As Tikz:
+```{r warning=FALSE}
+install.packagesCond("tikzDevice")
+library("tikzDevice")
+
+tikzDevice::tikz('rq4_xp_AccKappa.tex', width = 6.47, height = 4.1)
+gridExtra::grid.arrange(
+  ggplotRFE(allResultsCrossProject[[1]]),
+  ggplotRFE(allResultsCrossProject[[2]]),
+  ggplotRFE(allResultsCrossProject[[3]]),
+  ggplotRFE(allResultsCrossProject[[4]]),
+  ggplotRFE(allResultsCrossProject[[5]]),
+  ggplotRFE(allResultsCrossProject[[6]]),
+  ggplotRFE(allResultsCrossProject[[7]]),
+  ggplotRFE(allResultsCrossProject[[8]]),
+  ggplotRFE(allResultsCrossProject[[9]]),
+  ggplotRFE(allResultsCrossProject[[10]]),
+  ggplotRFE(allResultsCrossProject[[11]]),
+  ggplotRFE(allResultsCrossProject[[12]]),
+  ggplotRFE(allResultsCrossProject[[13]]),
+  ggplotRFE(allResultsCrossProject[[14]]),
+  ggplotRFE(allResultsCrossProject[[15]]),
+  ggplotRFE(allResultsCrossProject[[16]]),
+  ggplotRFE(allResultsCrossProject[[17]]),
+  ggplotRFE(allResultsCrossProject[[18]]),
+  ggplotRFE(allResultsCrossProject[[19]]),
+  ggplotRFE(allResultsCrossProject[[20]]),
+  
+  nrow = 4
+)
+dev.off()
+```
+
+### Same plot with facetting
+Let's attempt to facet the 5x4 plot so that we get common axes. We need to throw together all RFE-results into one frame and add categorical variables to each row for the dataset and generation.
+
+```{r}
+# Combine the results of each RFE:
+
+allResultsCrossFacet <- data.frame(matrix(nrow = 0, ncol = length(colnames(allResultsCrossProject[[1]]$results)) + 2))
+colnames(allResultsCrossFacet) <- c(
+  colnames(allResultsCrossProject[[1]]$results),
+  c("Dataset", "Generations")
+)
+
+for (i in 1:length(abc)) { # Datasets
+  datasetName <- toupper(abc[i])
+  
+  for (j in 1:length(generations)) { # Generations
+    generationName <- as.character(generations[j])
+      
+    dsIdx <- (i - 1) * 5 + j
+    dsResults <- allResultsCrossProject[[dsIdx]]$results
+    
+    dsResults$Dataset <- datasetName
+    dsResults$Generations <- generationName
+   
+    allResultsCrossFacet <- rbind(allResultsCrossFacet, dsResults)
+  }
+}
+```
+
+```{r}
+# Plot the combined results, using facetting
+
+rq4XpAccKappa2 <- ggplot() +
+  geom_line(data=allResultsCrossFacet, aes(x=Variables,y=Accuracy,color='Accuracy'), size=1) +
+  geom_line(data=allResultsCrossFacet, aes(x=Variables,y=Kappa,color='Kappa'), size=1) +
+  theme_light(base_size = 9) +
+  scale_x_log10() +
+  scale_y_continuous(labels = seq(0, 1, by=0.1), breaks = seq(0, 1, by=0.1)) +
+  scale_color_manual("", breaks = c("Accuracy", "Kappa"), values = c("#888888", "#cc0000")) +
+  facet_grid(Dataset ~ Generations, scales = 'free', labeller=label_both) +
+  theme(
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black"),
+    legend.position = "bottom",
+    axis.title.y.left = element_text(margin = ggplot2::margin(r=7.5)),
+    axis.title.x.bottom = element_text(margin = ggplot2::margin(t=7.5))
+  )
+
+rq4XpAccKappa2
+```
+
+#### As Tikz:
+```{r warning=FALSE}
+install.packagesCond("tikzDevice")
+library("tikzDevice")
+
+tikzDevice::tikz('rq4_xp_AccKappa2.tex', width = tikzWidth2Col, height = 4.1)
+rq4XpAccKappa2
+dev.off()
+```
+
+### Plots for retained features:
+```{r}
+countVars <- function(rfe, generation, net = FALSE) {
+  theVars <- rfe$optVariables
+  
+  if (generation == 0) {
+    # Count those variables that DO NOT start with "gen"
+    theVars <- theVars[grepl("^(?!gen[0-9]+)", theVars, perl = TRUE)]
+  } else {
+    theVars <- theVars[grepl(
+      paste("^gen", generation, sep = ""), theVars)]
+  }
+  
+  if (net) {
+    theVars <- theVars[grepl("Net$", theVars)]
+  }
+  
+  return(length(theVars))
+}
+
+countVarsMultGens <- function(rfe, fromInclGen, upToInclGen, net = FALSE) {
+  sum <- 0
+  for (i in c(fromInclGen:upToInclGen)) {
+    sum <- sum + countVars(rfe, i, net)
+  }
+  return(sum)
+}
+
+ggplotRFEbarChart <- function(rfe, generations) {
+  genVars <- c()
+  genVarsNet <- c()
+  for (i in c(0:generations)) {
+    genVars <- c(genVars, countVars(rfe, i))
+    genVarsNet <- c(genVarsNet, countVars(rfe, i, TRUE))
+  }
+  
+  # We have to interleave the data
+  temp <- data.frame(
+    model = rep(c(0:generations), each=2),
+    type = rep(c("All", "Net"), generations + 1),
+    value = c(rbind(genVars, genVarsNet))
+  )
+  
+  ggplot(temp, aes(fill=type, y=value, x=model)) +
+    geom_bar(position = "dodge", stat = "identity", alpha = 0.66) +
+    theme_light(base_size = 9) +
+    labs(fill = element_blank()) +
+    scale_fill_brewer(palette="Paired") +
+    theme(legend.position = "none") +
+    xlab(element_blank()) +
+    ylab(element_blank()) +
+    scale_x_discrete(
+      labels = c(0:generations), breaks = c(0:generations), limits = c(0:generations))
+}
+```
+
+```{r}
+rq4XpRetainedVars <- gridExtra::grid.arrange(
+  ggplotRFEbarChart(allResultsCrossProject[[1]], 1),
+  ggplotRFEbarChart(allResultsCrossProject[[2]], 2),
+  ggplotRFEbarChart(allResultsCrossProject[[3]], 3),
+  ggplotRFEbarChart(allResultsCrossProject[[4]], 5),
+  ggplotRFEbarChart(allResultsCrossProject[[5]], 8),
+  ggplotRFEbarChart(allResultsCrossProject[[6]], 1),
+  ggplotRFEbarChart(allResultsCrossProject[[7]], 2),
+  ggplotRFEbarChart(allResultsCrossProject[[8]], 3),
+  ggplotRFEbarChart(allResultsCrossProject[[9]], 5),
+  ggplotRFEbarChart(allResultsCrossProject[[10]], 8),
+  ggplotRFEbarChart(allResultsCrossProject[[11]], 1),
+  ggplotRFEbarChart(allResultsCrossProject[[12]], 2),
+  ggplotRFEbarChart(allResultsCrossProject[[13]], 3),
+  ggplotRFEbarChart(allResultsCrossProject[[14]], 5),
+  ggplotRFEbarChart(allResultsCrossProject[[15]], 8),
+  ggplotRFEbarChart(allResultsCrossProject[[16]], 1),
+  ggplotRFEbarChart(allResultsCrossProject[[17]], 2),
+  ggplotRFEbarChart(allResultsCrossProject[[18]], 3),
+  ggplotRFEbarChart(allResultsCrossProject[[19]], 5),
+  ggplotRFEbarChart(allResultsCrossProject[[20]], 8),
+  
+  nrow = 4
+)
+
+rq4XpRetainedVars
+```
+
+#### As Tikz:
+```{r}
+tikzDevice::tikz('rq4_xp_retainedVars.tex', width = tikzWidth2Col, height = 4.8)
+rq4XpRetainedVars
+dev.off()
+```
+
+### Same plot with facetting
+Let's generate this plot with facetting as well.
+
+```{r}
+interleaveRFEdataset <- function(rfe, generations) {
+  genVars <- c()
+  genVarsNet <- c()
+  for (i in c(0:generations)) {
+    genVars <- c(genVars, countVars(rfe, i))
+    genVarsNet <- c(genVarsNet, countVars(rfe, i, TRUE))
+  }
+  
+  # We have to interleave the data
+  temp <- data.frame(
+    Model = rep(c(0:generations), each=2),
+    Type = rep(c("All", "Net"), generations + 1),
+    value = c(rbind(genVars, genVarsNet))
+  )
+  
+  return(temp)
+}
+```
+
+```{r}
+temp <- interleaveRFEdataset(allResultsCrossProject[[1]], 1)
+
+allResultsRetainedVarsFacet <- data.frame(matrix(nrow = 0, ncol = length(colnames(temp)) + 2))
+colnames(allResultsRetainedVarsFacet) <- c(
+  colnames(temp),
+  c("Dataset", "Generations")
+)
+
+for (i in 1:length(abc)) { # Datasets
+  datasetName <- toupper(abc[i])
+  
+  for (j in 1:length(generations)) { # Generations
+    generationName <- as.character(generations[j])
+      
+    dsIdx <- (i - 1) * 5 + j
+    dsResults <- interleaveRFEdataset(allResultsCrossProject[[dsIdx]], generations[j])
+    
+    dsResults$Dataset <- datasetName
+    dsResults$Generations <- generationName
+   
+    allResultsRetainedVarsFacet <- rbind(allResultsRetainedVarsFacet, dsResults)
+  }
+}
+```
+
+```{r}
+rq4XpRetainedVars2 <- ggplot(allResultsRetainedVarsFacet, aes(fill=Type, y=value, x=Model)) +
+  geom_bar(position = "dodge", stat = "identity", alpha = 0.66) +
+  theme_light(base_size = 9) +
+  scale_fill_brewer(palette="Paired") +
+  scale_x_continuous(
+    breaks = c(0:8),
+    labels = c("$P$", "1", "2", "3", "4", "5", "6", "7", "8")
+  ) +
+  xlab("Variables retained per generation ($P$ being the principal commit)") +
+  ylab("Model size (variables)") +
+  facet_grid(Dataset ~ Generations, scales = 'free', labeller=label_both) +
+  theme(
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black"),
+    legend.position = "bottom",
+    axis.title.y.left = element_text(margin = ggplot2::margin(r=15)),
+    axis.title.x.bottom = element_text(margin = ggplot2::margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = ggplot2::margin(r = 1, unit = "picas")))
+
+rq4XpRetainedVars2
+```
+
+#### As Tikz:
+```{r}
+tikzDevice::tikz('rq4_xp_retainedVars2.tex', width = tikzWidth2Col, height = 4.8)
+rq4XpRetainedVars2
+dev.off()
+```
+
+### Table for retained features
+We will add a table summarizing the results of the previous plot matrix.
+
+```{r}
+# Some dataset-shortcuts:
+a1 <- allResultsCrossProject[[1]]
+a2 <- allResultsCrossProject[[2]]
+a3 <- allResultsCrossProject[[3]]
+a5 <- allResultsCrossProject[[4]]
+a8 <- allResultsCrossProject[[5]]
+
+b1 <- allResultsCrossProject[[6]]
+b2 <- allResultsCrossProject[[7]]
+b3 <- allResultsCrossProject[[8]]
+b5 <- allResultsCrossProject[[9]]
+b8 <- allResultsCrossProject[[10]]
+
+c1 <- allResultsCrossProject[[11]]
+c2 <- allResultsCrossProject[[12]]
+c3 <- allResultsCrossProject[[13]]
+c5 <- allResultsCrossProject[[14]]
+c8 <- allResultsCrossProject[[15]]
+
+d1 <- allResultsCrossProject[[16]]
+d2 <- allResultsCrossProject[[17]]
+d3 <- allResultsCrossProject[[18]]
+d5 <- allResultsCrossProject[[19]]
+d8 <- allResultsCrossProject[[20]]
+```
+
+| Dataset | 1 Gen. | 2 Gens. | 3 Gens. | 5 Gens. | 8 Gens. |
+|:-------:|-------:|--------:|--------:|--------:|--------:|
+| A       | `r a1$optsize` (`r countVarsMultGens(a1, 0, 1, TRUE)`) / `r countVarsMultGens(a1, 1, 1)` (`r countVarsMultGens(a1, 1, 1, TRUE)`) | `r a2$optsize` (`r countVarsMultGens(a2, 0, 2, TRUE)`) / `r countVarsMultGens(a2, 1, 2)` (`r countVarsMultGens(a2, 1, 2, TRUE)`) | `r a3$optsize` (`r countVarsMultGens(a3, 0, 3, TRUE)`) / `r countVarsMultGens(a3, 1, 3)` (`r countVarsMultGens(a3, 1, 3, TRUE)`) | `r a5$optsize` (`r countVarsMultGens(a5, 0, 5, TRUE)`) / `r countVarsMultGens(a5, 1, 5)` (`r countVarsMultGens(a5, 1, 5, TRUE)`) | `r a8$optsize` (`r countVarsMultGens(a8, 0, 8, TRUE)`) / `r countVarsMultGens(a8, 1, 8)` (`r countVarsMultGens(a8, 1, 8, TRUE)`) |
+| B       | `r b1$optsize` (`r countVarsMultGens(b1, 0, 1, TRUE)`) / `r countVarsMultGens(b1, 1, 1)` (`r countVarsMultGens(b1, 1, 1, TRUE)`) | `r b2$optsize` (`r countVarsMultGens(b2, 0, 2, TRUE)`) / `r countVarsMultGens(b2, 1, 2)` (`r countVarsMultGens(b2, 1, 2, TRUE)`) | `r b3$optsize` (`r countVarsMultGens(b3, 0, 3, TRUE)`) / `r countVarsMultGens(b3, 1, 3)` (`r countVarsMultGens(b3, 1, 3, TRUE)`) | `r b5$optsize` (`r countVarsMultGens(b5, 0, 5, TRUE)`) / `r countVarsMultGens(b5, 1, 5)` (`r countVarsMultGens(b5, 1, 5, TRUE)`) | `r b8$optsize` (`r countVarsMultGens(b8, 0, 8, TRUE)`) / `r countVarsMultGens(b8, 1, 8)` (`r countVarsMultGens(b8, 1, 8, TRUE)`) |
+| C       | `r c1$optsize` (`r countVarsMultGens(c1, 0, 1, TRUE)`) / `r countVarsMultGens(c1, 1, 1)` (`r countVarsMultGens(c1, 1, 1, TRUE)`) | `r c2$optsize` (`r countVarsMultGens(c2, 0, 2, TRUE)`) / `r countVarsMultGens(c2, 1, 2)` (`r countVarsMultGens(c2, 1, 2, TRUE)`) | `r c3$optsize` (`r countVarsMultGens(c3, 0, 3, TRUE)`) / `r countVarsMultGens(c3, 1, 3)` (`r countVarsMultGens(c3, 1, 3, TRUE)`) | `r c5$optsize` (`r countVarsMultGens(c5, 0, 5, TRUE)`) / `r countVarsMultGens(c5, 1, 5)` (`r countVarsMultGens(c5, 1, 5, TRUE)`) | `r c8$optsize` (`r countVarsMultGens(c8, 0, 8, TRUE)`) / `r countVarsMultGens(c8, 1, 8)` (`r countVarsMultGens(c8, 1, 8, TRUE)`) |
+| D       | `r d1$optsize` (`r countVarsMultGens(d1, 0, 1, TRUE)`) / `r countVarsMultGens(d1, 1, 1)` (`r countVarsMultGens(d1, 1, 1, TRUE)`) | `r d2$optsize` (`r countVarsMultGens(d2, 0, 2, TRUE)`) / `r countVarsMultGens(d2, 1, 2)` (`r countVarsMultGens(d2, 1, 2, TRUE)`) | `r d3$optsize` (`r countVarsMultGens(d3, 0, 3, TRUE)`) / `r countVarsMultGens(d3, 1, 3)` (`r countVarsMultGens(d3, 1, 3, TRUE)`) | `r d5$optsize` (`r countVarsMultGens(d5, 0, 5, TRUE)`) / `r countVarsMultGens(d5, 1, 5)` (`r countVarsMultGens(d5, 1, 5, TRUE)`) | `r d8$optsize` (`r countVarsMultGens(d8, 0, 8, TRUE)`) / `r countVarsMultGens(d8, 1, 8)` (`r countVarsMultGens(d8, 1, 8, TRUE)`) |
+
+
+### Boxplot with aggregated features
+Let's collect some aggregated results for each of the four datasets A/B/C/D.
+
+```{r}
+collectBestAccKappaList <- function(acc = TRUE, rfes) {
+  results <- c()
+  
+  for (rfe in rfes) {
+    newVal <- rfe$results$Accuracy[rfe$optsize]
+    if (!acc) {
+      newVal <- rfe$results$Kappa[rfe$optsize]
+    }
+    results <- c(results, newVal)
+  }
+  return(results)
+}
+
+
+collectBestAccKappa <- function(acc = TRUE, ...) {
+  # Each variadic argument is an instance of RFE results.
+  results <- c()
+  rfes <- list(...)
+  
+  return(collectBestAccKappaList(acc, rfes))
+}
+```
+
+We will combine all accuracy- and all kappa-boxplots, as we do not have many values and it would distort the graph too much otherwise.
+
+```{r}
+aggA <- collectBestAccKappa(TRUE, a1,a2,a3,a5,a8)
+aggAK <- collectBestAccKappa(FALSE, a1,a2,a3,a5,a8)
+aggB <- collectBestAccKappa(TRUE, b1,b2,b3,b5,b8)
+aggBK <- collectBestAccKappa(FALSE, b1,b2,b3,b5,b8)
+aggC <- collectBestAccKappa(TRUE, c1,c2,c3,c5,c8)
+aggCK <- collectBestAccKappa(FALSE, c1,c2,c3,c5,c8)
+aggD <- collectBestAccKappa(TRUE, d1,d2,d3,d5,d8)
+aggDK <- collectBestAccKappa(FALSE, d1,d2,d3,d5,d8)
+
+allAccu <- data.frame(
+  Dataset = c(rep("A", 5), rep("C", 5), rep("D", 5)),
+  Values = c(aggA, aggC, aggD),
+  Type = rep("Accuracy", length(c(aggA, aggC, aggD)))
+)
+allKappa <- data.frame(
+  Dataset = c(rep("A", 5), rep("C", 5), rep("D", 5)),
+  Values = c(aggAK, aggCK, aggDK),
+  Type = rep("Kappa", length(c(aggAK, aggCK, aggDK)))
+)
+
+allAccuB <- data.frame(
+  Dataset = rep("B", 5),
+  Values = aggB,
+  Type = rep("Accuracy", length(aggB))
+)
+allKappaB <- data.frame(
+  Dataset = rep("B", 5),
+  Values = aggBK,
+  Type = rep("Kappa", length(aggBK))
+)
+
+
+ggplotRFEboxPlot <- function(ds, ylab = "Accuracy", palette = "Paired") {
+  ggplot(ds, aes(x=Dataset, y=Values, color=Dataset)) +
+    geom_boxplot(aes(fill=Dataset), alpha = 0.33) +
+    scale_color_brewer(palette = palette) +
+    scale_fill_brewer(palette = palette) +
+    theme_light(base_size = 9) +
+    geom_jitter(shape=21, position = position_jitter(0.2)) +
+    xlab(element_blank()) + ylab(ylab) +
+    scale_x_discrete(labels = c()) +
+    scale_y_continuous()
+}
+```
+
+```{r}
+gridExtra::grid.arrange(
+  ggplotRFEboxPlot(allAccu),
+  ggplotRFEboxPlot(allAccuB, palette = "Pastel1"),
+  
+  ggplotRFEboxPlot(allKappa, "Kappa"),
+  ggplotRFEboxPlot(allKappaB, "Kappa", palette = "Pastel1"),
+  
+  widths = c(2, 1),
+  nrow = 2
+)
+```
+
+#### As Tikz:
+```{r}
+tikzDevice::tikz('rq4_xp_AccKappaBoxPlots.tex', width = 6.47, height = 3)
+gridExtra::grid.arrange(
+  ggplotRFEboxPlot(allAccu),
+  ggplotRFEboxPlot(allAccuB, palette = "Pastel1"),
+  
+  ggplotRFEboxPlot(allKappa, "Kappa"),
+  ggplotRFEboxPlot(allKappaB, "Kappa", palette = "Pastel1"),
+
+  widths = c(2, 1),
+  nrow = 2
+)
+dev.off()
+```
+
+### Same plot, but facetted
+
+```{r}
+allCombined <- rbind(allAccu, allKappa, allAccuB, allKappaB)
+
+ggplot(allCombined, aes(x=Dataset, y=Values, color=Dataset)) +
+  geom_boxplot(aes(fill=Dataset), alpha = 0.33) +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") +
+  theme_light(base_size = 9) +
+  geom_jitter(shape=21, position = position_jitter(0.2)) +
+  scale_y_continuous() +
+  xlab(element_blank()) +
+  facet_grid(. ~ Type, scales = "fixed") + theme(strip.background = element_rect(fill="#dfdfdf"), strip.text = element_text(color="black"), legend.position = "right", axis.title.y.left = element_text(margin = ggplot2::margin(r=15)))
+```
+
+
+#### ZeroR baselines for each sub-dataset
+For each generation, we need to find the __ZeroR__ accuracy. It may vary, as we are getting different amounts of principal commits per generation.
+
+```{r}
+getZeroRForGeneration <- function(generation, ds = NULL) {
+  if (is.null(ds)) {
+    ds <- getDataset(paste("rq4_a_gen", generation, sep = ""))
+  }
+  zeroR <- predictZeroR(ds$label)
+  
+  return(length(which(ds$label == zeroR)) / nrow(ds))
+}
+```
+
+```{r}
+zeroRcrossProjectAllGens <- data.frame(
+  generation = generations,
+  zeroR = sapply(generations, getZeroRForGeneration)
+)
+```
+
+The average ZeroR across the generations is __`r (sum(zeroRcrossProjectAllGens$zeroR) / nrow(zeroRcrossProjectAllGens))`__.
+
+| Generation | ZeroR |
+|:-:|:-|
+| 1          | `r zeroRcrossProjectAllGens$zeroR[1]` |
+| 2          | `r zeroRcrossProjectAllGens$zeroR[2]` |
+| 3          | `r zeroRcrossProjectAllGens$zeroR[3]` |
+| 5          | `r zeroRcrossProjectAllGens$zeroR[4]` |
+| 8          | `r zeroRcrossProjectAllGens$zeroR[5]` |
+
+
+#### Some tabular results
+
+| Dataset     | Min | Max | Range | Mean | Median |
+|:-----------:|----:|----:|------:|-----:|-------:|
+| A (acc.)    | `r min(aggA)` | `r max(aggA)` | `r max(aggA) - min(aggA)` | `r mean(aggA)` | `r median(aggA)` |
+| B (acc.)    | `r min(aggB)` | `r max(aggB)` | `r max(aggB) - min(aggB)` | `r mean(aggB)` | `r median(aggB)` |
+| C (acc.)    | `r min(aggC)` | `r max(aggC)` | `r max(aggC) - min(aggC)` | `r mean(aggC)` | `r median(aggC)` |
+| D (acc.)    | `r min(aggD)` | `r max(aggD)` | `r max(aggD) - min(aggD)` | `r mean(aggD)` | `r median(aggD)` |
+| A (Kappa)   | `r min(aggAK)` | `r max(aggAK)` | `r max(aggAK) - min(aggAK)` | `r mean(aggAK)` | `r median(aggAK)` |
+| B (Kappa)   | `r min(aggBK)` | `r max(aggBK)` | `r max(aggBK) - min(aggBK)` | `r mean(aggBK)` | `r median(aggBK)` |
+| C (Kappa)   | `r min(aggCK)` | `r max(aggCK)` | `r max(aggCK) - min(aggCK)` | `r mean(aggCK)` | `r median(aggCK)` |
+| D (Kappa)   | `r min(aggDK)` | `r max(aggDK)` | `r max(aggDK) - min(aggDK)` | `r mean(aggDK)` | `r median(aggDK)` |
+
+
+
+## Single Projects
+Now that we have evaluated the performance across projects, we want to set the results into relation for individual projects. We are interested in the following:
+
+* Extract the same box-plots, as we are expecting greater spreads and absolute results, for each of the datasets A/B/C/D
+* Gross vs. Net: Which attributes are retained most often: For this, make bar charts, but average the results across datasets (one row of bar charts)
+* Optimal model size (number of variables), also make box-plots for that (or tabular results)
+
+```{r}
+# First, we create flattened lists for each dataset. Each of these
+# flattened lists is then a list of RFE objects.
+
+flatA <- unlist(list(
+  allResultsSingleProject[[1]],
+  allResultsSingleProject[[2]],
+  allResultsSingleProject[[3]],
+  allResultsSingleProject[[4]],
+  allResultsSingleProject[[5]]
+), recursive = FALSE)
+
+flatB <- unlist(list(
+  allResultsSingleProject[[6]],
+  allResultsSingleProject[[7]],
+  allResultsSingleProject[[8]],
+  allResultsSingleProject[[9]],
+  allResultsSingleProject[[10]]
+), recursive = FALSE)
+
+flatC <- unlist(list(
+  allResultsSingleProject[[11]],
+  allResultsSingleProject[[12]],
+  allResultsSingleProject[[13]],
+  allResultsSingleProject[[14]],
+  allResultsSingleProject[[15]]
+), recursive = FALSE)
+
+flatD <- unlist(list(
+  allResultsSingleProject[[16]],
+  allResultsSingleProject[[17]],
+  allResultsSingleProject[[18]],
+  allResultsSingleProject[[19]],
+  allResultsSingleProject[[20]]
+), recursive = FALSE)
+```
+
+### Boxplot with aggregated features
+
+```{r}
+sAggA <- collectBestAccKappaList(TRUE, flatA)
+sAggAK <- collectBestAccKappaList(FALSE, flatA)
+sAggB <- collectBestAccKappaList(TRUE, flatB)
+sAggBK <- collectBestAccKappaList(FALSE, flatB)
+sAggC <- collectBestAccKappaList(TRUE, flatC)
+sAggCK <- collectBestAccKappaList(FALSE, flatC)
+sAggD <- collectBestAccKappaList(TRUE, flatD)
+sAggDK <- collectBestAccKappaList(FALSE, flatD)
+
+sAggA <- sAggA[!is.na(sAggA) & sAggA >= 0]
+sAggAK <- sAggAK[!is.na(sAggAK) & sAggAK >= 0]
+sAggB <- sAggB[!is.na(sAggB) & sAggB >= 0]
+sAggBK <- sAggBK[!is.na(sAggBK) & sAggBK >= 0]
+sAggC <- sAggC[!is.na(sAggC) & sAggC >= 0]
+sAggCK <- sAggCK[!is.na(sAggCK) & sAggCK >= 0]
+sAggD <- sAggD[!is.na(sAggD) & sAggD >= 0]
+sAggDK <- sAggDK[!is.na(sAggDK) & sAggDK >= 0]
+
+sAllAccu <- data.frame(
+  Dataset = c(rep("A", length(sAggA)), rep("B", length(sAggB)), rep("C", length(sAggC)), rep("D", length(sAggD))),
+  Values = c(sAggA, sAggB, sAggC, sAggD),
+  Type = rep("Accuracy", length(c(sAggA, sAggB, sAggC, sAggD)))
+)
+sAllKappa <- data.frame(
+  Dataset = c(rep("A", length(sAggAK)), rep("B", length(sAggBK)), rep("C", length(sAggCK)), rep("D", length(sAggDK))),
+  Values = c(sAggAK, sAggBK, sAggCK, sAggDK),
+  Type = rep("Kappa", length(c(sAggAK, sAggBK, sAggCK, sAggDK)))
+)
+
+#sAllAccuB <- data.frame(
+#  Dataset = rep("B", length(sAggB)),
+#  Values = sAggB
+#)
+#sAllKappaB <- data.frame(
+#  Dataset = rep("B", length(sAggBK)),
+#  Values = sAggBK
+#)
+```
+
+
+```{r}
+gridExtra::grid.arrange(
+  ggplotRFEboxPlot(sAllAccu) + scale_y_continuous(labels = seq(0, 1, by = 0.05), breaks = seq(0, 1, by = 0.05)),
+  #ggplotRFEboxPlot(sAllAccuB, palette = "Pastel1"),
+  
+  ggplotRFEboxPlot(sAllKappa, "Kappa") + scale_y_continuous(labels = seq(0, 1, by = 0.05), breaks = seq(0, 1, by = 0.05)),
+  #ggplotRFEboxPlot(sAllKappaB, "Kappa", palette = "Pastel1"),
+  
+  nrow = 1
+)
+```
+
+#### As Tikz
+
+```{r}
+tikzDevice::tikz('rq4_sp_AccKappaBoxPlots.tex', width = 6.47, height = 3)
+gridExtra::grid.arrange(
+  ggplotRFEboxPlot(sAllAccu) + scale_y_continuous(labels = seq(0, 1, by = 0.05), breaks = seq(0, 1, by = 0.05)),
+  #ggplotRFEboxPlot(sAllAccuB, palette = "Pastel1"),
+  
+  ggplotRFEboxPlot(sAllKappa, "Kappa") + scale_y_continuous(labels = seq(0, 1, by = 0.05), breaks = seq(0, 1, by = 0.05)),
+  #ggplotRFEboxPlot(sAllKappaB, "Kappa", palette = "Pastel1"),
+  
+  nrow = 1
+)
+dev.off()
+```
+
+### The same plot, but facetted
+
+```{r}
+sAllCombined <- rbind(sAllAccu, sAllKappa)
+
+rq4SpAccKappaBoxPlots2 <- ggplot(sAllCombined, aes(x=Dataset, y=Values, color=Dataset)) +
+  geom_boxplot(aes(fill=Dataset), alpha = 0.33) +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") +
+  theme_light(base_size = 9) +
+  geom_jitter(shape=21, position = position_jitter(0.2)) +
+  scale_y_continuous() +
+  xlab(element_blank()) +
+  ylab("Value") +
+  facet_wrap(Type ~ ., scales = "free", nrow = 2) +
+  theme(
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black"),
+    legend.position = "bottom",
+    legend.title = element_text(margin = ggplot2::margin(r=10)),
+    axis.text.x = element_blank(),
+    axis.title.y.left = element_text(margin = ggplot2::margin(r=15)))
+
+rq4SpAccKappaBoxPlots2
+```
+
+#### As Tikz
+
+```{r}
+tikzDevice::tikz('rq4_sp_AccKappaBoxPlots2.tex', width = tikzWidth1Col, height = 4.5)
+rq4SpAccKappaBoxPlots2
+dev.off()
+```
+
+#### ZeroR across generations and projects
+We will collect the ZeroR for each project in each generation.
+
+```{r}
+zeroRSingleProjectAllGens <- data.frame(matrix(nrow = 0, ncol = 5))
+
+for (gen in generations) {
+  dsGen <- getDataset(paste("rq4_a_gen", gen, sep = ""))
+  projects <- unique(dsGen$project)
+  
+  zeroRvalues <- c()
+  for (proj in projects) {
+    zeroRvalues <- c(zeroRvalues, getZeroRForGeneration(gen, dsGen[dsGen$project == proj, ]))
+  }
+  
+  zeroRSingleProjectAllGens <- rbind(zeroRSingleProjectAllGens, c(
+    gen, min(zeroRvalues), mean(zeroRvalues), max(zeroRvalues), length(zeroRvalues)
+  ))
+}
+colnames(zeroRSingleProjectAllGens) <- c("generation", "min", "avg", "max", "numProj")
+```
+
+Let's print those ZeroR's:
+
+| Generation | ZeroR (min) | ZeroR (avg) | ZeroR (max) | No. of projects |
+|:-:|:-|:-|:-|:-|
+| 1 | `r zeroRSingleProjectAllGens[1,]$min` | `r zeroRSingleProjectAllGens[1,]$avg` | `r zeroRSingleProjectAllGens[1,]$max` | `r zeroRSingleProjectAllGens[1,]$numProj` |
+| 2 | `r zeroRSingleProjectAllGens[2,]$min` | `r zeroRSingleProjectAllGens[2,]$avg` | `r zeroRSingleProjectAllGens[2,]$max` | `r zeroRSingleProjectAllGens[2,]$numProj` |
+| 3 | `r zeroRSingleProjectAllGens[3,]$min` | `r zeroRSingleProjectAllGens[3,]$avg` | `r zeroRSingleProjectAllGens[3,]$max` | `r zeroRSingleProjectAllGens[3,]$numProj` |
+| 5 | `r zeroRSingleProjectAllGens[4,]$min` | `r zeroRSingleProjectAllGens[4,]$avg` | `r zeroRSingleProjectAllGens[4,]$max` | `r zeroRSingleProjectAllGens[4,]$numProj` |
+| 8 | `r zeroRSingleProjectAllGens[5,]$min` | `r zeroRSingleProjectAllGens[5,]$avg` | `r zeroRSingleProjectAllGens[5,]$max` | `r zeroRSingleProjectAllGens[5,]$numProj` |
+
+
+#### Tabular results
+
+| Dataset     | Min | Max | Range | Mean | Median |
+|:-----------:|----:|----:|------:|-----:|-------:|
+| A (acc.)    | `r min(sAggA)` | `r max(sAggA)` | `r max(sAggA) - min(sAggA)` | `r mean(sAggA)` | `r median(sAggA)` |
+| B (acc.)    | `r min(sAggB)` | `r max(sAggB)` | `r max(sAggB) - min(sAggB)` | `r mean(sAggB)` | `r median(sAggB)` |
+| C (acc.)    | `r min(sAggC)` | `r max(sAggC)` | `r max(sAggC) - min(sAggC)` | `r mean(sAggC)` | `r median(sAggC)` |
+| D (acc.)    | `r min(sAggD)` | `r max(sAggD)` | `r max(sAggD) - min(sAggD)` | `r mean(sAggD)` | `r median(sAggD)` |
+| A (Kappa)   | `r min(sAggAK)` | `r max(sAggAK)` | `r max(sAggAK) - min(sAggAK)` | `r mean(sAggAK)` | `r median(sAggAK)` |
+| B (Kappa)   | `r min(sAggBK)` | `r max(sAggBK)` | `r max(sAggBK) - min(sAggBK)` | `r mean(sAggBK)` | `r median(sAggBK)` |
+| C (Kappa)   | `r min(sAggCK)` | `r max(sAggCK)` | `r max(sAggCK) - min(sAggCK)` | `r mean(sAggCK)` | `r median(sAggCK)` |
+| D (Kappa)   | `r min(sAggDK)` | `r max(sAggDK)` | `r max(sAggDK) - min(sAggDK)` | `r mean(sAggDK)` | `r median(sAggDK)` |
+
+
+
+### Model sizes, net vs. gross
+
+```{r}
+countVarsSingleProj <- function(rfes, generation) {
+  # rfes is all RFEs from one dataset in one generation
+  #optSize <- sapply(rfes, function(rfe) { return(rfe$optsize) })
+  
+  sumOptSize <- 0
+  sumOptSizeNet <- 0
+  sumRetained <- 0
+  sumRetainedNet <- 0
+  
+  minOptSize <- 9999
+  minOptSizeNet <- 9999
+  minSumRetained <- 9999
+  minSumRetainedNet <- 9999
+  
+  maxOptSize <- 0
+  maxOptSizeNet <- 0
+  maxSumRetained <- 0
+  maxSumRetainedNet <- 0
+  
+  
+  for (rfe in rfes) {
+    val <- rfe$optsize
+    sumOptSize <- sumOptSize + val
+    minOptSize <- min(minOptSize, val)
+    maxOptSize <- max(maxOptSize, val)
+    
+    val <- countVarsMultGens(rfe, 0, generation, TRUE)
+    sumOptSizeNet <- sumOptSizeNet + val
+    minOptSizeNet <- min(minOptSizeNet, val)
+    maxOptSizeNet <- max(maxOptSizeNet, val)
+    
+    val <- countVarsMultGens(rfe, 1, generation, FALSE)
+    sumRetained <- sumRetained + val
+    minSumRetained <- min(minSumRetained, val)
+    maxSumRetained <- max(maxSumRetained, val)
+    
+    val <- countVarsMultGens(rfe, 1, generation, TRUE)
+    sumRetainedNet <- sumRetainedNet + val
+    minSumRetainedNet <- min(minSumRetainedNet, val)
+    maxSumRetainedNet <- max(maxSumRetainedNet, val)
+  }
+  
+  return(c(
+    # averages
+    round(c(sumOptSize, sumOptSizeNet, sumRetained, sumRetainedNet) / length(rfes), 1),
+    # max
+    c(maxOptSize, maxOptSizeNet, maxSumRetained, maxSumRetainedNet),
+    # min
+    c(minOptSize, minOptSizeNet, minSumRetained, minSumRetainedNet)
+    ))
+}
+```
+
+```{r}
+sa1 <- countVarsSingleProj(allResultsSingleProject[[1]], 1)
+sa2 <- countVarsSingleProj(allResultsSingleProject[[2]], 2)
+sa3 <- countVarsSingleProj(allResultsSingleProject[[3]], 3)
+sa5 <- countVarsSingleProj(allResultsSingleProject[[4]], 5)
+sa8 <- countVarsSingleProj(allResultsSingleProject[[5]], 8)
+
+sb1 <- countVarsSingleProj(allResultsSingleProject[[6]], 1)
+sb2 <- countVarsSingleProj(allResultsSingleProject[[7]], 2)
+sb3 <- countVarsSingleProj(allResultsSingleProject[[8]], 3)
+sb5 <- countVarsSingleProj(allResultsSingleProject[[9]], 5)
+sb8 <- countVarsSingleProj(allResultsSingleProject[[10]], 8)
+
+sc1 <- countVarsSingleProj(allResultsSingleProject[[11]], 1)
+sc2 <- countVarsSingleProj(allResultsSingleProject[[12]], 2)
+sc3 <- countVarsSingleProj(allResultsSingleProject[[13]], 3)
+sc5 <- countVarsSingleProj(allResultsSingleProject[[14]], 5)
+sc8 <- countVarsSingleProj(allResultsSingleProject[[15]], 8)
+
+sd1 <- countVarsSingleProj(allResultsSingleProject[[16]], 1)
+sd2 <- countVarsSingleProj(allResultsSingleProject[[17]], 2)
+sd3 <- countVarsSingleProj(allResultsSingleProject[[18]], 3)
+sd5 <- countVarsSingleProj(allResultsSingleProject[[19]], 5)
+sd8 <- countVarsSingleProj(allResultsSingleProject[[20]], 8)
+```
+
+| Dataset | 1 Gen. | 2 Gens. | 3 Gens. | 5 Gens. | 8 Gens. |
+|:-------:|-------:|--------:|--------:|--------:|--------:|
+| A       | `r sa1[1]` (`r sa1[2]`) / `r sa1[3]` (`r sa1[4]`) | `r sa2[1]` (`r sa2[2]`) / `r sa2[3]` (`r sa2[4]`) | `r sa3[1]` (`r sa3[2]`) / `r sa3[3]` (`r sa3[4]`) | `r sa5[1]` (`r sa5[2]`) / `r sa5[3]` (`r sa5[4]`) | `r sa8[1]` (`r sa8[2]`) / `r sa8[3]` (`r sa8[4]`) |
+| B       | `r sb1[1]` (`r sb1[2]`) / `r sb1[3]` (`r sb1[4]`) | `r sb2[1]` (`r sb2[2]`) / `r sb2[3]` (`r sb2[4]`) | `r sb3[1]` (`r sb3[2]`) / `r sb3[3]` (`r sb3[4]`) | `r sb5[1]` (`r sb5[2]`) / `r sb5[3]` (`r sb5[4]`) | `r sb8[1]` (`r sb8[2]`) / `r sb8[3]` (`r sb8[4]`) |
+| C       | `r sc1[1]` (`r sc1[2]`) / `r sc1[3]` (`r sc1[4]`) | `r sc2[1]` (`r sc2[2]`) / `r sc2[3]` (`r sc2[4]`) | `r sc3[1]` (`r sc3[2]`) / `r sc3[3]` (`r sc3[4]`) | `r sc5[1]` (`r sc5[2]`) / `r sc5[3]` (`r sc5[4]`) | `r sc8[1]` (`r sc8[2]`) / `r sc8[3]` (`r sc8[4]`) |
+| D       | `r sd1[1]` (`r sd1[2]`) / `r sd1[3]` (`r sd1[4]`) | `r sd2[1]` (`r sd2[2]`) / `r sd2[3]` (`r sd2[4]`) | `r sd3[1]` (`r sd3[2]`) / `r sd3[3]` (`r sd3[4]`) | `r sd5[1]` (`r sd5[2]`) / `r sd5[3]` (`r sd5[4]`) | `r sd8[1]` (`r sd8[2]`) / `r sd8[3]` (`r sd8[4]`) |
+
+
+The following table displays the same as above, just the maximum values instead.
+
+| Dataset | 1 Gen. | 2 Gens. | 3 Gens. | 5 Gens. | 8 Gens. |
+|:-------:|-------:|--------:|--------:|--------:|--------:|
+| A       | `r sa1[5]` (`r sa1[6]`) / `r sa1[7]` (`r sa1[8]`) | `r sa2[5]` (`r sa2[6]`) / `r sa2[7]` (`r sa2[8]`) | `r sa3[5]` (`r sa3[6]`) / `r sa3[7]` (`r sa3[8]`) | `r sa5[5]` (`r sa5[6]`) / `r sa5[7]` (`r sa5[8]`) | `r sa8[5]` (`r sa8[6]`) / `r sa8[7]` (`r sa8[8]`) |
+| B       | `r sb1[5]` (`r sb1[6]`) / `r sb1[7]` (`r sb1[8]`) | `r sb2[5]` (`r sb2[6]`) / `r sb2[7]` (`r sb2[8]`) | `r sb3[5]` (`r sb3[6]`) / `r sb3[7]` (`r sb3[8]`) | `r sb5[5]` (`r sb5[6]`) / `r sb5[7]` (`r sb5[8]`) | `r sb8[5]` (`r sb8[6]`) / `r sb8[7]` (`r sb8[8]`) |
+| C       | `r sc1[5]` (`r sc1[6]`) / `r sc1[7]` (`r sc1[8]`) | `r sc2[5]` (`r sc2[6]`) / `r sc2[7]` (`r sc2[8]`) | `r sc3[5]` (`r sc3[6]`) / `r sc3[7]` (`r sc3[8]`) | `r sc5[5]` (`r sc5[6]`) / `r sc5[7]` (`r sc5[8]`) | `r sc8[5]` (`r sc8[6]`) / `r sc8[7]` (`r sc8[8]`) |
+| D       | `r sd1[5]` (`r sd1[6]`) / `r sd1[7]` (`r sd1[8]`) | `r sd2[5]` (`r sd2[6]`) / `r sd2[7]` (`r sd2[8]`) | `r sd3[5]` (`r sd3[6]`) / `r sd3[7]` (`r sd3[8]`) | `r sd5[5]` (`r sd5[6]`) / `r sd5[7]` (`r sd5[8]`) | `r sd8[5]` (`r sd8[6]`) / `r sd8[7]` (`r sd8[8]`) |
+
+
+.. and this table, displays the minimum values instead.
+
+| Dataset | 1 Gen. | 2 Gens. | 3 Gens. | 5 Gens. | 8 Gens. |
+|:-------:|-------:|--------:|--------:|--------:|--------:|
+| A       | `r sa1[9]` (`r sa1[10]`) / `r sa1[11]` (`r sa1[12]`) | `r sa2[9]` (`r sa2[10]`) / `r sa2[11]` (`r sa2[12]`) | `r sa3[9]` (`r sa3[10]`) / `r sa3[11]` (`r sa3[12]`) | `r sa5[9]` (`r sa5[10]`) / `r sa5[11]` (`r sa5[12]`) | `r sa8[9]` (`r sa8[10]`) / `r sa8[11]` (`r sa8[12]`) |
+| B       | `r sb1[9]` (`r sb1[10]`) / `r sb1[11]` (`r sb1[12]`) | `r sb2[9]` (`r sb2[10]`) / `r sb2[11]` (`r sb2[12]`) | `r sb3[9]` (`r sb3[10]`) / `r sb3[11]` (`r sb3[12]`) | `r sb5[9]` (`r sb5[10]`) / `r sb5[11]` (`r sb5[12]`) | `r sb8[9]` (`r sb8[10]`) / `r sb8[11]` (`r sb8[12]`) |
+| C       | `r sc1[9]` (`r sc1[10]`) / `r sc1[11]` (`r sc1[12]`) | `r sc2[9]` (`r sc2[10]`) / `r sc2[11]` (`r sc2[12]`) | `r sc3[9]` (`r sc3[10]`) / `r sc3[11]` (`r sc3[12]`) | `r sc5[9]` (`r sc5[10]`) / `r sc5[11]` (`r sc5[12]`) | `r sc8[9]` (`r sc8[10]`) / `r sc8[11]` (`r sc8[12]`) |
+| D       | `r sd1[9]` (`r sd1[10]`) / `r sd1[11]` (`r sd1[12]`) | `r sd2[9]` (`r sd2[10]`) / `r sd2[11]` (`r sd2[12]`) | `r sd3[9]` (`r sd3[10]`) / `r sd3[11]` (`r sd3[12]`) | `r sd5[9]` (`r sd5[10]`) / `r sd5[11]` (`r sd5[12]`) | `r sd8[9]` (`r sd8[10]`) / `r sd8[11]` (`r sd8[12]`) |
+
+
+
