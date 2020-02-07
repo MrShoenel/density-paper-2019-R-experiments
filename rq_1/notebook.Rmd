@@ -3,6 +3,7 @@ title: "Experiments for RQ 1"
 output:
   html_document:
     df_print: paged
+    number_sections: true
   html_notebook: default
   pdf_document: default
   word_document: default
@@ -12,6 +13,8 @@ output:
 ```{r warning=FALSE}
 source("../helpers.R")
 knitr::opts_chunk$set(rows.print=25, cols.print=15)
+# This is in inches!
+tikzWidth1Col <- 3.48
 ```
 
 # Research Question 1
@@ -38,6 +41,9 @@ labelDist <- table(ds$label)
 print(labelDist)
 barplot(labelDist)
 ```
+
+## Distribution of labels, per project
+Let's look at the distribution of each of the A/C/P labels, and draw a chart per project.
 
 ## First Part
 We are following Herraiz et al. for determining if the evolutionary patterns are the same for classifying commits, w.r.t. number of files and lines of code. We are approaching this by plotting the density of gross- and net-amount of files and gross- and net-amount of lines of code.
@@ -97,8 +103,95 @@ print(all_s)
 ```
 
 ```{r}
-tikzDevice::tikz('density_plots.tex', width = 3.4, height = 5)
+tikzDevice::tikz('density_plots.tex', width = tikzWidth1Col, height = 5)
 gridExtra::grid.arrange(gf, nf, gs, ns, nrow=4)
+dev.off()
+```
+
+### Same plots, but facetted
+We will try and do the same 4 density plots, but using facetting.
+
+```{r}
+density_alpha <- .33
+labelsFull <- list(a = "Adaptive", c = "Corrective", p = "Perfective")
+dsTypes <- c("GrossFiles", "NetFiles", "GrossSize", "NetSize")
+dsCombined <- data.frame(matrix(nrow = 0, ncol = 5), stringsAsFactors = FALSE)
+colnames(dsCombined) <- c("value", "Type", "DsType", "Measure", "NetOrGross")
+
+for (dsType in dsTypes) {
+  netOrGross <- "Gross"
+  measure <- "Files"
+  if (grepl("Size$", dsType)) {
+    measure <- "LOC"
+  }
+  
+  addNetVal <- 0
+  if (grepl("^Net", dsType)) {
+    addNetVal <- 0.1
+    netOrGross <- "Net"
+  }
+  temp <- data.frame(
+    value = ds[[dsType]] + addNetVal,
+    Type = sapply(ds$label, function(l){ return(labelsFull[[l]]) }),
+    DsType = dsType,
+    Measure = measure,
+    NetOrGross = netOrGross
+  )
+  
+  dsCombined <- rbind(dsCombined, temp)
+}
+
+mu_gf$Measure <- rep("Files", 3)
+mu_gf$NetOrGross <- rep("Gross", 3)
+mu_nf$Measure <- rep("Files", 3)
+mu_nf$NetOrGross <- rep("Net", 3)
+mu_gs$Measure <- rep("Size", 3)
+mu_gs$NetOrGross <- rep("Gross", 3)
+mu_ns$Measure <- rep("Size", 3)
+mu_ns$NetOrGross <- rep("Net", 3)
+
+musCombined <- rbind(mu_gf, mu_gs, mu_nf, mu_ns)
+musCombined$Type <- sapply(musCombined$label, function(l){ return(labelsFull[[l]]) })
+musCombined$DsType <- paste(musCombined$NetOrGross, musCombined$Measure, sep = "")
+
+
+densPlot2 <- ggplot(dsCombined, aes(x = value, color = Type, fill = Type)) +
+  geom_density(size = 1, alpha = density_alpha, position = "fill") +
+  theme_light(base_size = 9) +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  geom_vline(
+    data=filter(musCombined),
+    aes(xintercept = grp.mean, color = Type), size = 1, linetype = "dashed"
+  ) +
+  xlab("Amount of Files/LOC") + ylab("Stacked density per maintenance activity") +
+  scale_color_brewer(palette = use_palette) +
+  scale_fill_brewer(palette = use_palette) +
+  annotation_logticks(sides="b") +
+  facet_wrap(
+    DsType ~., scales = "free_x", ncol = 1,
+    labeller = labeller(DsType = c(
+      "GrossFiles" = "Files, gross", "GrossSize" = "LOC, gross",
+      "NetFiles" = "Files, net", "NetSize" = "LOC, net"))
+  ) +
+  theme(
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black"),
+    legend.position = "bottom",
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas"))
+  )
+
+densPlot2
+```
+#### As Tikz
+```{r}
+tikzDevice::tikz('density_plots2.tex', width = tikzWidth1Col, height = 5.5)
+densPlot2
 dev.off()
 ```
 
@@ -150,7 +243,7 @@ Every tenth commit is a small change (i.e. only one line affected). Are net-size
 Here we will check what the probabiltiy of a certain kind of commit in a certain size-range is.
 ```{r}
 size <- nrow(ds)
-ranges <- c(0, 1, 2, 3, 4, 5, 8, 10, 15, 25, 50, 75, 100, 200, 500, 1000, 3000, 10000)
+ranges <- c(0, 1, 2, 3, 4, 5, 8, 10, 15, 25, 50, 75, 100, 200, 500, 1000, 3000, 10000, 25000, 50000, 100000)
 
 ecdfNet <- ecdf(ds$NetSize)
 ecdfGro <- ecdf(ds$GrossSize)
@@ -192,12 +285,71 @@ gro_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, we
 net_et <- ggplot(temp, aes(x=as.factor(temp$max))) + geom_bar(aes(fill=label, weight=net), alpha = density_alpha, width = .85) + theme_light(base_size = 9) + scale_fill_brewer(palette = use_palette) + ylab("Ratio") + xlab("Net-size, LOC, $ecdf(x)$") + labs(fill="Type") + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
 
 gridExtra::grid.arrange(gro_et, net_et, nrow=2)
-
-tikzDevice::tikz('ecdf_ratio_per_label.tex', width = 3.4, height = 2.6)
+```
+```{r}
+tikzDevice::tikz('ecdf_ratio_per_label.tex', width = 3.8, height = 2.6)
 gridExtra::grid.arrange(gro_et, net_et, nrow=2)
 dev.off()
 ```
 
+
+### Plot the same, but facetted
+```{r}
+library(data.table)
+tempXnetGross <- copy(temp)
+tempXnetGross$Value <- temp$net
+tempXnetGross$DsType <- rep("Net", nrow(temp))
+ecdfRatioCombined <- rbind(tempXnetGross)
+
+tempXnetGross <- copy(temp)
+tempXnetGross$Value <- temp$gro
+tempXnetGross$DsType <- rep("Gross", nrow(temp))
+ecdfRatioCombined <- rbind(ecdfRatioCombined, tempXnetGross)
+
+ecdfRatioCombined$max <- as.factor(ecdfRatioCombined$max)
+
+labelsFull <- list(a = "Adaptive", c = "Corrective", p = "Perfective")
+ecdfRatioCombined$label <- sapply(ecdfRatioCombined$label, function(l){ return(labelsFull[[l]]) })
+ecdfRatioCombinedXLabs <- c("Gross" = "Gross-size, LOC, $\\textit{ecdf(x)}$", Net = "Net-size, LOC, $\\textit{ecdf(x)}$")
+
+saveRDS(ecdfRatioCombined, "ecdfRatioCombined.rds")
+saveRDS(ecdfRatioCombinedXLabs, "ecdfRatioCombinedXLabs.rds")
+```
+
+```{r}
+density_alpha <- .5
+ecdfRatioCombined <- readRDS("ecdfRatioCombined.rds")
+ecdfRatioCombinedXLabs <- readRDS("ecdfRatioCombinedXLabs.rds")
+
+ecdfRatioPerLab2 <- ggplot(ecdfRatioCombined, aes(x = max)) +
+  geom_bar(aes(fill=label, weight=Value), alpha = density_alpha, width = .85) +
+  theme_light(base_size = 9) +
+  scale_fill_brewer(palette = use_palette) +
+  ylab("Cumulative ratio per activity") +
+  xlab("Lines of code") +
+  labs(fill="Type") +
+  theme(axis.text.x = element_text(angle = 60, vjust = .4)) +
+  scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")}) +
+  facet_wrap(. ~ DsType, nrow = 2, labeller = labeller(DsType = ecdfRatioCombinedXLabs)) +
+  theme(
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black"),
+    legend.position = "bottom",
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas"))
+  )
+
+ecdfRatioPerLab2
+```
+
+#### As Tikz
+```{r}
+tikzDevice::tikz('ecdf_ratio_per_label2.tex', width = tikzWidth1Col, height = 3.4)
+ecdfRatioPerLab2
+dev.off()
+```
 
 Also, let's check the distribution of commits within specific ranges, regardless of their label:
 
@@ -227,6 +379,7 @@ Now let's print these two series as well:
 
 ```{r}
 temp <- percTable[order(percTable$max), ]
+temp <- temp[temp$net < 1-1e-4, ]
 
 temp1 <- data.frame(
   max = rep(temp$max, each=2),
@@ -236,12 +389,356 @@ temp1 <- data.frame(
 
 density_alpha <- 0.66
 
-ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity", alpha = density_alpha) + theme_light(base_size = 9) + xlab("Size, LOC, $ecdf(x)$") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
+ratioRangeComm <- ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) +
+  geom_bar(position = "dodge", stat = "identity", alpha = density_alpha) +
+  theme_light(base_size = 9) +
+  xlab("Size, LOC, $\\textit{ecdf(x)}$") +
+  ylab("Ratio") +
+  scale_fill_brewer(palette="Paired") +
+  scale_y_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) +
+  theme(
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas")),
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, vjust = .4)
+  ) +
+  scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
 
-tikzDevice::tikz('ratio_range_commit.tex', width = 3.4, height = 2)
-ggplot(temp1, aes(fill=Type, y=value, x=as.factor(temp1$max))) + geom_bar(position = "dodge", stat = "identity", alpha = density_alpha) + theme_light(base_size = 9) + xlab("Size, LOC, $ecdf(x)$") + ylab("Ratio") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 1, 0.1), limits = c(0, 1)) + theme(axis.text.x = element_text(angle = 90, vjust = .4)) + scale_x_discrete(labels = function(n){format(as.numeric(n), digits = 0, big.mark = ",")})
+ratioRangeComm
+```
+
+```{r}
+tikzDevice::tikz('ratio_range_commit.tex', width = tikzWidth1Col, height = 2.4)
+ratioRangeComm
 dev.off()
 ```
+
+
+# Addendum
+While we show differences between net- and gross-size, it is probably worth it show how significant this is on average. Therefore, we want to plot all net- vs. all gross-sizes of all commits we have analyzed during this project (short of 360k).
+
+```{r}
+gex_sizes <- getDataset("rq1_g_vs_n", removeUnwantedColums = F)
+#gex_sizes <- gex_sizes[gex_sizes$SizeGross > 0 & gex_sizes$SizeGross < 25e3, ]
+# Convert from Integer64 to double
+gex_sizes$SizeNet <- as.numeric(gex_sizes$SizeNet)
+gex_sizes$SizeGross <- as.numeric(gex_sizes$SizeGross)
+gex_num <- nrow(gex_sizes)
+# Commits with size 0 or equal net/gross:
+gex_num_size_0 <- sum(gex_sizes$SizeGross == 0)
+gex_num_size_same <- sum(gex_sizes$SizeGross == gex_sizes$SizeNet) - gex_num_size_0
+# Remove those where SizeGross is 0
+gex_sizes <- gex_sizes[gex_sizes$SizeGross > 0, ]
+# Those commits with Density=1:
+gex_sizes_dens_1 <- gex_sizes[gex_sizes$SizeNet == gex_sizes$SizeGross, ]
+# Then remove those with Density=1:
+gex_sizes <- gex_sizes[gex_sizes$SizeNet < gex_sizes$SizeGross, ]
+# Remove those where equal size:
+# Calculate the Density:
+gex_sizes$Density <- gex_sizes$SizeNet / gex_sizes$SizeGross
+gex_sizes_dens_1$Density <- 1
+```
+
+Out of `r gex_num` commits, `r gex_num_size_0` had a size of zero (gross and net), and another `r gex_num_size_same` had equal counts of lines affected gross/net (i.e., those had a Density of 1). The remaining amount of commits with a density between in the range $[0, 1)$ is `r nrow(gex_sizes)`, which is `r round(100 * nrow(gex_sizes) / gex_num, 2)` % of all commits. The average amount of lines gross is `r mean(gex_sizes$SizeGross)`, for net it is `r mean(gex_sizes$SizeNet)`. The correlation between net and gross is `r cor(gex_sizes["SizeGross"], gex_sizes["SizeNet"])`. We get about 1% of empty commits, those are due to, e.g., starting or stopping to track files that are yet empty, or changes in binary files that result in no lines changed.
+
+Let's plot these (all gross > 0 and gross != net):
+* Boxplot gross vs. net sizes
+* ecdf of Density
+* 2d density of Gross-size vs. Density
+
+```{r}
+density_alpha <- .66
+temp <- data.frame(
+  Size = c(gex_sizes$SizeGross + .1, gex_sizes$SizeNet + .1),
+  Type = c(rep("LOC, gross", nrow(gex_sizes)), rep("LOC, net", nrow(gex_sizes)))
+)
+tempMeans <- aggregate(Size ~ Type, temp, mean)
+tempMeans$Size <- round(tempMeans$Size)
+tempMeans$SizeLab <- paste("\\footnotesize{mean: $", tempMeans$Size, "$}", sep = "")
+tempMedians <- aggregate(Size ~ Type, temp, median)
+tempMedians$Size <- round(tempMedians$Size)
+tempMedians$SizeLab <- paste("\\footnotesize{median: $", tempMedians$Size, "$}", sep = "")
+set.seed(1337)
+tempJitter <- temp[sample(rownames(temp), 800), ] # limit for the plots!
+
+bp <- ggplot(temp[sample(rownames(temp), 2e4), ], aes(x=Type, y=Size, color=Type)) +
+    #geom_boxplot(aes(fill = Type), alpha = density_alpha) +
+    geom_violin(aes(fill = Type), alpha = density_alpha) +
+    facet_wrap(Type ~., scales = "free_x") + # This will eliminate empty cols
+    scale_color_brewer(palette = "Paired") +
+    scale_fill_brewer(palette = "Paired") +
+    theme_light(base_size = 9) +
+    #geom_jitter(data=tempJitter, shape=21, position = position_jitter(0.35)) +
+    geom_hline(data=tempMeans, aes(yintercept=Size), color="#666666") +
+    geom_label(
+      data=tempMeans,
+      aes(y=Size, label=SizeLab),
+      fill="#ffffffbb", color="black", hjust=.1
+    ) +
+    geom_hline(data=tempMedians, aes(yintercept=Size), color="#333333") +
+    geom_label(
+      data=tempMedians,
+      aes(y=Size, label=SizeLab),
+      fill="#ffffffbb", color="black", hjust=.1
+    ) +
+    xlab(element_blank()) +
+    ylab("Size of Commits in LOC") +
+    labs(fill = "Type", color = "Type") +
+    scale_y_log10(
+      breaks = c(.1, 1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6),
+      labels = c("0", sapply(c(0,1,2,3,4,5,6), function(x) paste("$10^{", x, "}$", sep = "")))
+      #breaks = scales::trans_breaks("log10", function(x) 10^x),
+      #labels = scales::trans_format("log10", function(x) paste("$10^{", x, "}$", sep = ""))
+    ) +
+    theme(legend.position = "none",
+          strip.background = element_rect(fill="#dfdfdf"),
+          strip.text = element_text(color="black"),
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y.left = element_text(margin = margin(r=15)))
+bp
+```
+```{r}
+# As Tikz:
+tikzDevice::tikz('density_net-vs-gross.tex', width = tikzWidth1Col, height = 2.5)
+bp
+dev.off()
+```
+
+Let's print the ECDF of the Density, once with the density=1 commits, and once without.
+
+```{r}
+set.seed(43215)
+numSamples <- 3500
+numSamplesD1 <- round(numSamples) / nrow(gex_sizes) * nrow(gex_sizes_dens_1)
+
+temp <- data.frame(
+  Density = c(
+    rbind(
+      gex_sizes[sample(rownames(gex_sizes), numSamples), ],
+      gex_sizes_dens_1[1:numSamplesD1, ]
+    )$Density,
+    gex_sizes[sample(rownames(gex_sizes), numSamples), ]$Density),
+  IncD1 = factor(c(
+    rep("$0 \\leq \\textit{Density} < 1$", numSamples),
+    rep("$0 \\leq \\textit{Density} \\leq 1$", numSamples + numSamplesD1)
+  ), levels = c("$0 \\leq \\textit{Density} < 1$", "$0 \\leq \\textit{Density} \\leq 1$"), ordered = T)
+)
+
+ecdfPlot <- ggplot(temp, aes(x=Density, fill=IncD1)) +
+  stat_ecdf(aes(ymin=0, ymax=..y..), geom = "ribbon", alpha = 0.33) +
+  stat_ecdf(geom = "step") +
+  ylab("$\\textit{ecdf(\\small{Density})}$") +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") +
+  scale_x_continuous(breaks = seq(0, 1, by = .1), labels = sapply(seq(0, 1, by = .1), function(x) format(x, nsmall=1))) +
+  scale_y_continuous(breaks = seq(0, 1, by = .1), labels = sapply(seq(0, 1, by = .1), function(x) format(x, nsmall=1))) +
+  theme_light(base_size = 9) +
+  xlab("Commit Density") +
+  theme(legend.position = "none",
+        strip.background = element_rect(fill="#dfdfdf"),
+        strip.text = element_text(color="black"),
+        axis.text.x = element_text(angle = 60, vjust = .4),
+        axis.title.y.left = element_text(margin = margin(r=15)),
+        axis.title.x.bottom = element_text(margin = margin(t=10))) +
+  facet_wrap(IncD1 ~., ncol = 2)
+
+ecdfPlot
+```
+
+```{r}
+# As Tikz:
+tikzDevice::tikz('density_ecdf.tex', width = tikzWidth1Col, height = 2.1)
+ecdfPlot
+dev.off()
+```
+
+
+The 2D density does not work well, we will create quantiles of the data and plot the density of Density for each.
+
+```{r}
+temp <- rbind(gex_sizes)#, gex_sizes_dens_1) # We do those extra!
+qs <- sort(quantile(temp$SizeGross, probs = c(seq(.125,.999,by=.125), .95)))
+temp <- data.frame()
+tempAgg <- data.frame()
+useLabOrdered <- c()
+
+for (i in 1:(1 + length(qs))) {
+  filtered <- NULL
+  useLab <- NULL
+  if (i == 1) {
+    filtered <- gex_sizes[gex_sizes$SizeGross <= qs[[i]], ]
+    #useLab <- paste("$\\textit{LOC} \\leq$", qs[[i]])
+    useLab <- paste("$\\left[0 ; ", qs[[i]], "\\right]$")
+  } else if (i == 1 + length(qs)) {
+    filtered <- gex_sizes[gex_sizes$SizeGross > qs[[i - 1]], ]
+    useLab <- paste("$\\left(", format(qs[[i - 1]], big.mark = ","), "; \\infty \\right]$")
+  } else {
+    filtered <- gex_sizes[gex_sizes$SizeGross > qs[[i - 1]] & gex_sizes$SizeGross <= qs[[i]], ]
+    useLab <- paste("$\\left(", format(qs[[i - 1]], big.mark = ","), ";", format(qs[[i]], big.mark = ","), "\\right]$")
+  }
+  
+  #filtered$Q <- ifelse(i == 1 + length(qs), "100§", gsub("%", "§", names(qs)[i]))
+  filtered$Q <- useLab
+  useLabOrdered <- c(useLabOrdered, useLab)
+  
+  temp <- rbind(temp, filtered)
+  temp$Q <- as.character(temp$Q)
+  
+  tempAgg <- rbind(tempAgg, data.frame(
+    mean = mean(filtered$Density),
+    median = median(filtered$Density),
+    max = max(filtered$Density),
+    min = min(filtered$Density),
+    Q = useLab
+  ))
+  tempAgg$Q <- as.character(tempAgg$Q)
+}
+
+#temp$Q <- factor(temp$Q, levels = c(tail(sort(unique(temp$Q)), -1), "100§"), ordered = T)
+#temp$Q <- as.factor(temp$Q)
+temp$Q <- factor(temp$Q, useLabOrdered, ordered = T)
+qs
+```
+```{r}
+ggplot(temp, aes(Density, color=Q, fill=Q)) + geom_density(alpha=.5) +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") +
+  facet_wrap(Q ~ .) +
+  xlab("Commit-Density") +
+  ylab("Statistical density") +
+  labs(fill="Quantile", color="Quantile") +
+  theme_light(base_size = 9) +
+  theme(#legend.position = "bottom",
+        strip.background = element_rect(fill="#dfdfdf"),
+        strip.text = element_text(color="black"),
+        axis.title.y.left = element_text(margin = margin(r=15)),
+        axis.title.x.bottom = element_text(margin = margin(t=10)))
+```
+
+```{r}
+library(ggridges)
+
+ridgePlot <- ggplot(temp, aes(x = Density, y = Q, fill = Q)) +
+  scale_color_brewer(palette = "Paired") +
+  scale_fill_brewer(palette = "Paired") +
+  geom_density_ridges(alpha = .33) +
+  labs(fill="Quantile", color="Quantile") +
+  xlab("Commit Density") +
+  ylab("Relative Likelihood") +
+  labs(fill = "Commit Size\nin LOC (range)") +
+  theme_light(base_size = 9) +
+  theme(axis.text.y = element_blank(),
+        legend.position = "bottom",
+        legend.title = element_text(margin = margin(t=-23, r=2.5)),
+        legend.text = element_text(margin = margin(r=0)),
+        axis.title.x.bottom = element_text(margin = margin(t=10))) +
+  guides(fill=guide_legend(nrow=4, byrow = T))
+
+ridgePlot
+```
+
+```{r}
+tikzDevice::tikz('density_in_quantiles.tex', width = tikzWidth1Col, height = 3.5)
+ridgePlot
+dev.off()
+```
+
+The last part is to show (Density=1)-commits' distribution
+
+```{r}
+dens1Plot <- ggplot(gex_sizes_dens_1, aes(SizeGross, fill="")) +
+  geom_density(alpha=.33, size=1) +
+  scale_x_log10(
+    limits = c(1, 10^2.5),
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", function(x) paste("$10^{", x, "}$", sep = ""))
+  ) +
+  scale_color_brewer(palette = use_palette) +
+  scale_fill_brewer(palette = use_palette) +
+  annotation_logticks(sides="b") +
+  ylab("Relative Likelihood") +
+  xlab("Gross Commit size in LOC") +
+  theme_light(base_size = 9) +
+  theme(legend.position = "none",
+        axis.title.x.bottom = element_text(margin = margin(t=10)),
+        axis.title.y.left = element_text(margin = margin(r=15)))
+
+dens1Plot
+```
+
+
+```{r}
+tikzDevice::tikz('density_1_density.tex', width = tikzWidth1Col, height = 2)
+dens1Plot
+dev.off()
+```
+
+
+# Density stacked bar-charts
+We were asked to explain the density better. We create a stacked bar-chart for this purpose, demonstrating net- vs. gross-size (and everything contributing to it).
+
+```{r}
+densFactor <- factor(c(), levels = c("Detailed", "All"), ordered = T)
+densTypeFactor <- factor(c(), levels = c("Gross size", "Net-Functionality", "Clones", "Dead code", "Whitespace", "Comments"), ordered = T)
+
+densBarData <- data.frame(
+  Bar = factor(c(rep("Detailed", 6), rep("All", 6)), levels = levels(densFactor)),
+  Type = factor(rep(c("Gross size", "Clones", "Dead code", "Whitespace", "Comments", "Net-Functionality"), 2), levels = levels(densTypeFactor)),
+  LOC = c(205, rep(0, 5), 0, 45, 20, 55, 35, 50)
+)
+
+densBarPlot <- ggplot(densBarData, aes(fill=Type, y=LOC, x=Bar)) +
+  ylab("Lines of Code") +
+  xlab("") +
+  geom_bar(position = "stack", stat="identity") +
+  scale_color_brewer(palette = use_palette) +
+  scale_fill_brewer(palette = use_palette) +
+  theme_light(base_size = 9) +
+  theme(axis.text.x = element_blank(),
+        legend.title = element_text(margin = margin(b=10)),
+        axis.title.x.bottom = element_blank(),
+        axis.title.y.left = element_text(margin = margin(r=15)))
+
+densBarPlot
+```
+
+```{r}
+tikzDevice::tikz('density_barplots.tex', width = 3.48, height = 2.2)
+densBarPlot
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

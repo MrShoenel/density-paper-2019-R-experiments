@@ -12,13 +12,16 @@ output:
 ```{r warning=FALSE}
 source("../helpers.R")
 knitr::opts_chunk$set(rows.print=25, cols.print=15)
+tikzWidth1Col <- 3.48 # 3.487..
 
 install.packagesCond("mlbench")
 library("mlbench")
 install.packagesCond("caret")
 library("caret")
-installed.packages("stringr")
+install.packagesCond("stringr")
 library("stringr")
+install.packagesCond("doParallel")
+library("doParallel")
 ```
 
 # Research Question 3
@@ -70,20 +73,43 @@ dsChanges <- dsCombined[, 1:48]
 Now let's build the models:
 
 ```{r}
-set.seed(31)
 
-numCv <- 10 # increase later to 10 (8)
-numRep <- 5 # increase later to 5 (3)
-control <- trainControl(
-  method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+if (file.exists("models.rds")) {
+  modelsTemp <- readRDS("models.rds")
+  modelCombined <- modelsTemp$combined
+  modelKeywords <- modelsTemp$keywords
+  modelChanges <- modelsTemp$changes
+} else {
+  set.seed(31)
+  numCv <- 10 # increase later to 10 (8)
+  numRep <- 5 # increase later to 5 (3)
+  control <- trainControl(
+    method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
+
+    cl <- makePSOCKcluster(detectCores())
+  registerDoParallel(cl)
+
+  modelCombined <- train(
+    label ~., data = dsCombined, method = "rf", trControl = control)
+  modelKeywords <- train(
+    label ~., data = dsKeywords, method = "rf", trControl = control)
+  modelChanges <- train(
+    label ~., data = dsChanges, method = "rf", trControl = control)
+  
+  modelsTemp <- list(
+    combined = modelCombined,
+    keywords = modelKeywords,
+    changes = modelChanges
+  )
+  
+  saveRDS(modelsTemp, "models.rds")
+
+  stopCluster(cl)
+  registerDoSEQ()
+}
 
 
-modelCombined <- train(
-  label ~., data = dsCombined, method = "rf", trControl = control)
-modelKeywords <- train(
-  label ~., data = dsKeywords, method = "rf", trControl = control)
-modelChanges <- train(
-  label ~., data = dsChanges, method = "rf", trControl = control)
+
 ```
 
 Let's replicate the results from Levin et al., using our Random Forest based models and their custom classifier for compound models. First, we are interested in the training performance of each compound model. To assess it, we combine the numeric votes for each class by either model and select the highest.
@@ -258,6 +284,9 @@ numRep <- 5 # increase later to 5 (3)
 control <- trainControl(
   method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
 
+cl <- makePSOCKcluster(detectCores())
+registerDoParallel(cl)
+
 # Strictly speaking it is not required to rebuild and retrain the modelKeywords and modelChanges,
 # as those are not affected by the additional attributes. We are still doing it, as the datasets
 # may be recreated using some specific preprocessing.
@@ -269,6 +298,9 @@ modelChanges <- train(
   label ~., data = dsChanges, method = "rf", trControl = control)
 modelDensity <- train(
   label ~., data = dsDensity, method = "rf", trControl = control)
+
+stopCluster(cl)
+registerDoSEQ()
 ```
 
 We are extending the list of compound models now the following way:
@@ -433,10 +465,26 @@ temp <- data.frame(
   type=rep(c("Accuracy", "Kappa"), nrow(validResultsModels)),
   value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
 )
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity", alpha = 0.66) + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + scale_y_continuous(breaks = seq(0, 0.8, 0.1), limits = c(0, 0.8))
+validWithDenOrg <- ggplot(temp, aes(fill=type, y=value, x=model)) +
+  geom_bar(position = "dodge", stat = "identity", alpha = 0.66) +
+  theme_light(base_size = 9) + xlab("Model") +
+  ylab("Value") +
+  labs(fill = "Type") +
+  scale_fill_brewer(palette="Paired") +
+  scale_y_continuous(breaks = seq(0, 0.8, 0.1), limits = c(0, 0.8)) +
+  theme(
+    legend.position = "bottom",
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas"))
+  )
 
-tikzDevice::tikz('validWithDen_org.tex', width = 3.4, height = 2.4)
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity", alpha = 0.66) + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired") + theme(legend.position="bottom") + scale_y_continuous(breaks = seq(0, 0.8, 0.1), limits = c(0, 0.8))
+validWithDenOrg
+```
+```{r}
+tikzDevice::tikz('validWithDen_org.tex', width = tikzWidth1Col, height = 2.2)
+validWithDenOrg
 dev.off()
 ```
 
@@ -527,6 +575,9 @@ numRep <- 5 # increase later to 5 (3)
 control <- trainControl(
   method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
 
+cl <- makePSOCKcluster(detectCores())
+registerDoParallel(cl)
+
 for (method in trainMethods) {
   
   modelTemp <- train(
@@ -545,6 +596,9 @@ for (method in trainMethods) {
   trainResults <- rbind(trainResults, newRow)
   trainResults$method <- as.character(trainResults$method)
 }
+
+stopCluster(cl)
+registerDoSEQ()
 ```
 
 
@@ -563,6 +617,9 @@ numRep <- 5 # increase later to 5 (3)
 control <- trainControl(
   method = "repeatedcv", number = numCv, repeats = numRep, savePredictions = T)
 
+cl <- makePSOCKcluster(detectCores())
+registerDoParallel(cl)
+
 # If we train the 'modelCombined' with the 'dsTune' dataset, the results are slightly worse.
 modelCombined <- train(
   label ~., data = dsCombined, method = "LogitBoost", trControl = control)
@@ -573,6 +630,8 @@ modelChanges <- train(
 modelDensity <- train(
   label ~., data = dsDensity, method = "LogitBoost", trControl = control)
 
+stopCluster(cl)
+registerDoSEQ()
 ```
 
 ```{r}
@@ -685,10 +744,17 @@ temp <- data.frame(
   type=rep(c("Accuracy", "Kappa"), nrow(validResultsModels)),
   value=c(rbind(validResultsModels$acc, validResultsModels$kappa))
 )
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+validOptimWithDenOrg <- ggplot(temp, aes(fill=type, y=value, x=model)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  theme_light(base_size = 9) + xlab("Model") +
+  ylab("Value") +
+  labs(fill = "Type") +
+  scale_fill_brewer(palette="Paired")
 
-tikzDevice::tikz('validOptimWithDen_org.tex', width = 3.4, height = 2.4)
-ggplot(temp, aes(fill=type, y=value, x=model)) + geom_bar(position = "dodge", stat = "identity") + theme_light(base_size = 9) + xlab("Model") + ylab("Value") + labs(fill = "Type") + scale_fill_brewer(palette="Paired")
+validOptimWithDenOrg
+
+tikzDevice::tikz('validOptimWithDen_org.tex', width = tikzWidth1Col, height = 2.2)
+validOptimWithDenOrg
 dev.off()
 ```
 

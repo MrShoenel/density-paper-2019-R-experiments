@@ -106,11 +106,33 @@ combineVotes <- function(votesLeft, votesRight) {
 }
 
 
-predictZeroR <- function(trainLabels) {
-  # First argument: column of a dataframe containing labels
-  t <- table(trainLabels)
+predictZeroR <- function(theLabels) {
+  # First argument: vector of labels, e.g. from a dataframe
+  theFactor <- theLabels
+  if (!is.factor(theLabels)) {
+    theFactor <- factor(as.character(theLabels), levels = sort(unique(theLabels)))
+  }
+  
+  t <- table(theLabels)
   m <- which.max(t)
-  return(rep(as.factor(names(t)[m]), length(trainLabels)))
+  
+  return(factor(rep(names(t)[m], length(theLabels)), levels = levels(theFactor)))
+}
+
+predictZeroRConfMatrix <- function(labels, trueLabels, retAccOnly = FALSE) {
+  trueLabelsFactor <- trueLabels
+  if (!is.factor(trueLabelsFactor)) {
+    trueLabelsFactor <- factor(as.character(trueLabels), levels = sort(unique(trueLabels)))
+  }
+  
+  labelsFactor <- factor(as.character(labels), levels = levels(trueLabelsFactor))
+  
+  cm <- confusionMatrix(predictZeroR(labelsFactor), trueLabelsFactor, mode = "everything")
+  
+  if (retAccOnly) {
+    return(cm$overall[["Accuracy"]])
+  }
+  return(cm)
 }
 
 
@@ -155,4 +177,9 @@ OneR <- function(X, targetId) {
   return(low.err.idx)
 }
 
+
+runif.sum <- function(n){
+  x <- sort(runif(n-1))
+  c(x,1) - c(0,x)
+}
 

@@ -12,6 +12,9 @@ output:
 ```{r warning=FALSE}
 source("../helpers.R")
 knitr::opts_chunk$set(rows.print=25, cols.print=15)
+# This is in inches!
+tikzWidth1Col <- 3.48 # 3.487..
+tikzWidth2Col <- 7.2 # 7.22433 original/maximal
 ```
 
 # Use regression
@@ -132,13 +135,20 @@ Using a _Recursive Feature Elimination_.
 ```{r warning=FALSE}
 set.seed(31)
 
-# We are training models now using RandomForests:
-install.packagesCond("randomForest")
+resultsX <- NULL
+if (file.exists("resultsX.rds")) {
+  resultsX <- readRDS("resultsX.rds")
+} else {
+  # We are training models now using RandomForests:
+  install.packagesCond("randomForest")
+  
+  control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 5)
+  resultsX <- rfe(ds[, 1:(length(ds)-1)], ds.label,
+                 # attempt to try sets of attributes between 1 and all attributes of size
+                 sizes = c(1:(length(ds)-1)), rfeControl = control)
+  saveRDS(resultsX, "resultsX.rds")
+}
 
-control <- rfeControl(functions = rfFuncs, method = "cv", number = 10, repeats = 3)
-resultsX <- rfe(ds[, 1:(length(ds)-1)], ds.label,
-               # attempt to try sets of attributes between 1 and all attributes of size
-               sizes = c(1:(length(ds)-1)), rfeControl = control)
 ```
 
 ```{r}
@@ -150,12 +160,27 @@ print(
 ```{r}
 print(resultsX)
 plot(resultsX, type=c("g", "o"))
-ggplot(resultsX, aes(x = resultsX$results$Accuracy, y = resultsX$results$Kappa)) +  geom_line(size=1,color='#666666') + geom_point(size=3, stroke=1.5, colour="#555555") + geom_point(size=3, aes(color=factor(c(1:nrow(resultsX$results))))) + theme_light(base_size = 9) + theme(legend.position = "none") + scale_x_continuous("Number of Variables", labels = c(1:length(resultsX)), breaks = c(1:length(resultsX))) + scale_color_brewer(palette = "Paired")
+
+xpModAcc <- ggplot(resultsX, aes(y = resultsX$results$Accuracy)) +
+  geom_line(size=0.75,color='#666666') + geom_point(size=2, stroke=1, colour="#555555") +
+  geom_point(size=2, aes(color=factor(c(1:nrow(resultsX$results))))) +
+  theme_light(base_size = 9) +
+  theme(
+    legend.position = "none",
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas"))
+  ) +
+  scale_x_continuous("Number of variables", labels = c(1:length(resultsX)), breaks = c(1:length(resultsX))) +
+  scale_color_brewer(palette = "Paired") + ylab("Accuracy")
+
+xpModAcc
 ```
 
 ```{r}
-tikzDevice::tikz('xp_modelAccuracy.tex', width = 3.4, height = 1.8)
-ggplot(resultsX, aes(x = resultsX$results$Accuracy, y = resultsX$results$Kappa)) +  geom_line(size=1,color='#666666') + geom_point(size=3, stroke=1.5, colour="#555555") + geom_point(size=3, aes(color=factor(c(1:nrow(resultsX$results))))) + theme_light(base_size = 9) + theme(legend.position = "none") + scale_x_continuous("Number of Variables", labels = c(1:length(resultsX)), breaks = c(1:length(resultsX))) + scale_color_brewer(palette = "Paired")
+tikzDevice::tikz('xp_modelAccuracy.tex', width = tikzWidth1Col, height = 1.5)
+xpModAcc
 dev.off()
 ```
 
@@ -355,11 +380,15 @@ print(resultsFeaturesAgg)
 # Draw some box-plots of the acp-labels:
 install.packagesCond("plyr")
 library("plyr")
+
+labelsFull <- list(a = "Adaptive", c = "Corrective", p = "Perfective")
 temp <- data.frame(
     #Type = as.factor(mapvalues(resultsAllVals$label, from = c("a", "c", "p"), to = c("adaptive", "corrective", "perfective"))),
-    Type = as.factor(resultsAllVals$label),
+    #Type = as.factor(resultsAllVals$label),
+    Type = sapply(resultsAllVals$label, function(l){ return(labelsFull[[l]]) }),
     value = resultsAllVals$value
 )
+
 
 bp <- ggplot(temp, aes(x=Type, y=value, color=Type)) +
     geom_boxplot(aes(fill = Type), alpha = 0.33) +
@@ -367,14 +396,92 @@ bp <- ggplot(temp, aes(x=Type, y=value, color=Type)) +
     scale_fill_brewer(palette = "Paired") +
     theme_light(base_size = 9) +
     geom_jitter(shape=21, position = position_jitter(0.2)) +
-    xlab(element_blank()) + ylab("Value") +
-    scale_x_discrete(labels = c()) +
-    scale_y_continuous(breaks=seq(0.5,0.9,0.05))
+    xlab(element_blank()) +
+    ylab("Variable importance") +
+    labs(fill = "", color = "") +
+    scale_x_discrete(labels = paste(unlist(labelsFull))) +
+    scale_y_continuous(breaks=seq(0.5,0.9,0.05), labels = seq(0.5,0.9,0.05)) +
+    theme(
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      axis.title.y.left = element_text(margin = margin(r=15)),
+      axis.text.x = element_blank())
 
 bp
-
-tikzDevice::tikz('acp_boxplots.tex', width = 3.4, height = 2.1)
+```
+```{r}
+tikzDevice::tikz('acp_boxplots.tex', width = tikzWidth1Col, height = 2.7)
 bp
+dev.off()
+```
+
+## Distribution of labels, per project
+The amount of labels per project is different, we should show these.
+
+```{r}
+labelsPerProj <- data.frame(matrix(nrow = 0, ncol = 3), stringsAsFactors = FALSE)
+colnames(labelsPerProj) <- c("value", "label", "project")
+
+for (proj in c(projects, "zzALL")) {
+  dsProj <- 0
+  if (proj == "zzALL") {
+    dsProj <- ds
+  } else {
+    dsProj <- ds[ds$RepoPathOrUrl == proj, ]
+  }
+  labelDist <- table(dsProj$label)
+  
+  for (label in labels) {
+    newRow <- list(
+      "value" = labelDist[[label]],
+      "label" = labelsFull[[label]],
+      "project" = proj
+    )
+    labelsPerProj <- rbind(labelsPerProj, newRow)
+    labelsPerProj$label <- as.character(labelsPerProj$label)
+    labelsPerProj$project <- as.character(labelsPerProj$project)
+  }
+}
+
+
+spXpLabelDistr <- ggplot(labelsPerProj, aes(x = label, y = value, fill = label)) +
+  geom_bar(position = "dodge", stat = "identity", alpha = 0.5) +
+  
+  theme_light(base_size = 9) +
+  scale_fill_brewer(palette="Paired") +
+  facet_wrap(. ~ project, scales = "free_y", labeller = labeller(project = function(projects) {
+    return(sapply(projects, function(p) {
+      if (p == "zzALL") {
+        return("\\textbf{\\emph{All Projects}}")
+      }
+      
+      lastSlash <- rev(gregexpr("\\/", p)[[1]])[1] + 1
+      gitPos <- rev(gregexpr("\\.git", p)[[1]])[1] - 1
+      return(substr(p, lastSlash, gitPos))
+    }))
+  })) +
+  xlab(element_blank()) +
+  ylab("Number of commits per activity") +
+  theme(
+    axis.text.x = element_text(angle = 20, vjust = .4),
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10)),
+    
+    legend.title = element_blank(),
+    legend.text = element_text(margin = margin(r = 1, unit = "picas")),
+    legend.position = "bottom",
+    
+    strip.background = element_rect(fill="#dfdfdf"),
+    strip.text = element_text(color="black")
+  )
+
+spXpLabelDistr
+```
+
+### As Tikz
+```{r}
+tikzDevice::tikz('sp-and-xp_labelDist.tex', width = tikzWidth2Col, height = 4.2)
+spXpLabelDistr
 dev.off()
 ```
 
@@ -410,8 +517,8 @@ for (p in projects) {
   varListProj[[p]] <- results$optVariables
   rTuple <- results$results[results$optsize:results$optsize, ]
   newRow <- list()
-  # cut same prefix and append number of variables used in parentheses
-  newRow["project"] <- paste(as.character(substr(p, 20, nchar(p) + 20)), paste("(", as.character(rTuple$Variables), ")", sep = ""))
+  # cut same prefix and append number of variables used in parentheses, also remove ".git"
+  newRow["project"] <- paste(as.character(substr(p, 20, nchar(p) + 16)), paste("(", as.character(rTuple$Variables), ")", sep = ""))
   newRow["numVars"] <- rTuple$Variables
   newRow["accuracy"] <- rTuple$Accuracy
   newRow["kappa"] <- rTuple$Kappa
@@ -432,20 +539,48 @@ print(list(
   mean_acc = mean(selProj$accuracy),
   mean_acc_zr = mean(selProj$acc_ZeroR)
 ))
+
+saveRDS(selProj, "selProj.rds")
 ```
 
 ```{r warning=FALSE}
+selProj <- readRDS("selProj.rds")
 rotate_x(selProj, "numVars", selProj$project, 35)
+selProj$projectShort <- sapply(selProj$project, function(x) {
+  x <- as.character(x)
+  x <- sub("^[a-z\\-]+\\/", "", x, ignore.case = T)
+  x <- sub("\\.git\\s\\(([0-9]+)\\)$", " (\\1)", x, ignore.case = T)
+  x <- sub("([a-z]+)(-[a-z]+)+", "\\1", x)
+  return(x)
+})
 
 install.packagesCond("reshape2")
 library("reshape2")
 
 # themes: https://ggplot2.tidyverse.org/reference/ggtheme.html
-ggplot(selProj, aes(x=kappa, y=accuracy, shape=project, group=project, color=project)) +  ylab("Accuracy") + xlab("Kappa") + geom_point(size=3.5, stroke=1.5, colour="#555555") + geom_point(size=3.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + theme_light(base_size = 9) + theme(legend.position = "bottom", legend.direction = "vertical") + scale_x_continuous("Kappa", labels = c(0:8)/20, breaks = c(0:8)/20) + scale_color_brewer(palette = "Paired")
+spAccKappa <- ggplot(selProj, aes(x=kappa, y=accuracy, shape=projectShort, group=projectShort, color=projectShort)) +
+  ylab("Accuracy") +
+  xlab("Kappa") +
+  geom_point(size=3.5, stroke=1.5, colour="#555555") +
+  geom_point(size=3.5) +
+  scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) +
+  theme_light(base_size = 9) +
+  scale_x_continuous("Kappa", labels = c(0:8)/20, breaks = c(0:8)/20) +
+  scale_color_brewer(palette = "Paired") +
+  labs(shape="Project", group="Project", color="Project") +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    axis.title.y.left = element_text(margin = margin(r=15)),
+    axis.title.x.bottom = element_text(margin = margin(t=10))
+  ) + guides(shape=guide_legend(ncol = 3))
 
+spAccKappa
+```
 
-tikzDevice::tikz('sp_AccuaryKappa.tex', width = 3.4, height = 4.5)
-ggplot(selProj, aes(x=kappa, y=accuracy, shape=project, group=project, color=project)) + ylab("Accuracy") + xlab("Kappa") + geom_point(size=3.5, stroke=1.5, colour="#555555") + geom_point(size=3.5) + scale_shape_manual(values = c(15,16,17,18,19,15,16,17,18,19,15)) + theme_light(base_size = 9) + theme(legend.position = "bottom", legend.direction = "vertical") + scale_x_continuous("Kappa", labels = c(0:8)/20, breaks = c(0:8)/20) + scale_color_brewer(palette = "Paired")
+```{r}
+tikzDevice::tikz('sp_AccuaryKappa.tex', width = tikzWidth1Col, height = 3.2)
+spAccKappa
 dev.off()
 ```
 
