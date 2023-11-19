@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Hönel"
+  given-names: "Sebastian"
+  orcid: "https://orcid.org/0000-0001-7937-1645"
+title: "GitHub Repository: density-paper-2019-R-experiments"
+version: v1.0.0-zenodo
+date-released: 2023-11-19
+doi: 10.5281/zenodo.10156945
+url: "https://github.com/MrShoenel/density-paper-2019-R-experiments"
